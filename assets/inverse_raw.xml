@@ -1,0 +1,35 @@
+<mujoco model="Inverse">
+  <compiler angle="radian"/>
+
+  <asset>
+    <mesh name="base_link" content_type="model/stl" file="../meshes/base_link.stl"/>
+    <mesh name="Robstride_S02_1" content_type="model/stl" file="../meshes/Robstride_S02_1.stl"/>
+    <mesh name="Rotor_1" content_type="model/stl" file="../meshes/Rotor_1.stl"/>
+    <mesh name="BoldHolder_1" content_type="model/stl" file="../meshes/BoldHolder_1.stl"/>
+    <mesh name="Bolt_1" content_type="model/stl" file="../meshes/Bolt_1.stl"/>
+    <mesh name="EN25-ABZ-256_1" content_type="model/stl" file="../meshes/EN25-ABZ-256_1.stl"/>
+  </asset>
+
+  <worldbody>
+    <geom type="mesh" contype="0" conaffinity="0" group="1" density="0" rgba="0.7 0.7 0.7 1" mesh="base_link"/>
+    <geom type="mesh" rgba="0.7 0.7 0.7 1" mesh="base_link"/>
+    <geom type="mesh" contype="0" conaffinity="0" group="1" density="0" rgba="0.7 0.7 0.7 1" mesh="Robstride_S02_1"/>
+    <geom type="mesh" rgba="0.7 0.7 0.7 1" mesh="Robstride_S02_1"/>
+    <body name="Rotor_1" pos="0 0 0.004">
+      <inertial pos="-0.000641237 0.020861 0.0151062" quat="0.140212 0.634222 -0.437725 0.621692" mass="0.053175" diaginertia="4.07858e-05 3.80533e-05 8.48022e-06"/>
+      <joint name="Revolute 3" pos="0 0 0" axis="0 0 -1"/>
+      <geom pos="0 0 -0.004" quat="1 0 0 0" type="mesh" contype="0" conaffinity="0" group="1" density="0" rgba="0.7 0.7 0.7 1" mesh="Rotor_1"/>
+      <geom pos="0 0 -0.004" quat="1 0 0 0" type="mesh" rgba="0.7 0.7 0.7 1" mesh="Rotor_1"/>
+      <geom pos="0 0 -0.004" type="mesh" contype="0" conaffinity="0" group="1" density="0" rgba="0.7 0.7 0.7 1" mesh="EN25-ABZ-256_1"/>
+      <geom pos="0 0 -0.004" type="mesh" rgba="0.7 0.7 0.7 1" mesh="EN25-ABZ-256_1"/>
+      <body name="BoldHolder_1" pos="0.0504 0 0.0188">
+        <inertial pos="0.004277 -2.21893e-08 -0.0368677" quat="0.7071 -0.00301735 -0.00301735 0.7071" mass="0.0318688" diaginertia="4.67205e-05 4.66298e-05 3.26106e-07"/>
+        <joint name="Revolute 5" pos="0 0 0" axis="-1 0 0"/>
+        <geom pos="-0.0504 0 -0.0228" quat="1 0 0 0" type="mesh" contype="0" conaffinity="0" group="1" density="0" rgba="0.7 0.7 0.7 1" mesh="BoldHolder_1"/>
+        <geom pos="-0.0504 0 -0.0228" quat="1 0 0 0" type="mesh" rgba="0.7 0.7 0.7 1" mesh="BoldHolder_1"/>
+        <geom pos="-0.0504 0 -0.0228" type="mesh" contype="0" conaffinity="0" group="1" density="0" rgba="0.7 0.7 0.7 1" mesh="Bolt_1"/>
+        <geom pos="-0.0504 0 -0.0228" type="mesh" rgba="0.7 0.7 0.7 1" mesh="Bolt_1"/>
+      </body>
+    </body>
+  </worldbody>
+</mujoco>

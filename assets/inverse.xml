@@ -1,0 +1,56 @@
+<mujoco model="Inverse">
+  <compiler angle="radian"/>
+
+  <statistic center="0.011 0 -0.028" extent="0.09"/>
+
+  <visual>
+    <headlight diffuse="0.8 0.8 0.8" ambient="0.3 0.3 0.3" specular="0.3 0.3 0.3"/>
+    <rgba haze="0.15 0.25 0.35 1"/>
+    <scale jointlength="0.006" jointwidth="0.0006" actuatorlength="0.006" actuatorwidth="0.0006" framelength="0.01" framewidth="0.0005"/>
+  </visual>
+
+  <asset>
+    <texture name="skybox" type="skybox" builtin="gradient" rgb1="0.04 0.06 0.08" rgb2="0 0 0" width="512" height="3072"/>
+    <texture name="grid" type="2d" builtin="checker" rgb1="0.18 0.24 0.30" rgb2="0.08 0.12 0.16" width="512" height="512"/>
+    <material name="floor_grid" texture="grid" texrepeat="8 8" reflectance="0.18"/>
+    <material name="robot_white" rgba="0.92 0.92 0.88 1"/>
+    <mesh name="base_link" content_type="model/stl" file="meshes/base_link.stl"/>
+    <mesh name="Robstride_S02_1" content_type="model/stl" file="meshes/Robstride_S02_1.stl"/>
+    <mesh name="Rotor_1" content_type="model/stl" file="meshes/Rotor_1.stl"/>
+    <mesh name="BoldHolder_1" content_type="model/stl" file="meshes/BoldHolder_1.stl"/>
+    <mesh name="Bolt_1" content_type="model/stl" file="meshes/Bolt_1.stl"/>
+    <mesh name="EN25-ABZ-256_1" content_type="model/stl" file="meshes/EN25-ABZ-256_1.stl"/>
+  </asset>
+
+  <worldbody>
+    <light name="key" pos="0.25 -0.6 0.8" dir="-0.25 0.6 -0.8" diffuse="1 1 1"/>
+    <light name="fill" pos="-0.4 0.3 0.5" dir="0.4 -0.3 -0.5" diffuse="0.35 0.35 0.35"/>
+    <camera name="front" pos="0.011 -0.28 -0.028" xyaxes="1 0 0 0 0 1"/>
+    <camera name="side" pos="0.28 0 -0.028" xyaxes="0 1 0 0 0 1"/>
+    <geom name="floor" type="plane" pos="0 0 -0.105" size="0.35 0.35 0.01" material="floor_grid"/>
+    <geom type="mesh" contype="0" conaffinity="0" group="1" density="0" material="robot_white" mesh="base_link"/>
+    <geom type="mesh" material="robot_white" mesh="base_link"/>
+    <geom type="mesh" contype="0" conaffinity="0" group="1" density="0" material="robot_white" mesh="Robstride_S02_1"/>
+    <geom type="mesh" material="robot_white" mesh="Robstride_S02_1"/>
+    <body name="Rotor_1" pos="0 0 0.004">
+      <inertial pos="-0.000641237 0.020861 0.0151062" quat="0.140212 0.634222 -0.437725 0.621692" mass="0.053175" diaginertia="4.07858e-05 3.80533e-05 8.48022e-06"/>
+      <joint name="Revolute 3" pos="0 0 0" axis="0 0 -1" damping="0.02" armature="0.0005"/>
+      <geom pos="0 0 -0.004" type="mesh" contype="0" conaffinity="0" group="1" density="0" material="robot_white" mesh="Rotor_1"/>
+      <geom pos="0 0 -0.004" type="mesh" material="robot_white" mesh="Rotor_1"/>
+      <geom pos="0 0 -0.004" type="mesh" contype="0" conaffinity="0" group="1" density="0" material="robot_white" mesh="EN25-ABZ-256_1"/>
+      <geom pos="0 0 -0.004" type="mesh" material="robot_white" mesh="EN25-ABZ-256_1"/>
+      <body name="BoldHolder_1" pos="0.0504 0 0.0188">
+        <inertial pos="0.004277 -2.21893e-08 -0.0368677" quat="0.7071 -0.00301735 -0.00301735 0.7071" mass="0.0318688" diaginertia="4.67205e-05 4.66298e-05 3.26106e-07"/>
+        <joint name="Revolute 5" pos="0 0 0" axis="-1 0 0" damping="0.001" frictionloss="0.0005" armature="0.00001"/>
+        <geom pos="-0.0504 0 -0.0228" type="mesh" contype="0" conaffinity="0" group="1" density="0" material="robot_white" mesh="BoldHolder_1"/>
+        <geom pos="-0.0504 0 -0.0228" type="mesh" material="robot_white" mesh="BoldHolder_1"/>
+        <geom pos="-0.0504 0 -0.0228" type="mesh" contype="0" conaffinity="0" group="1" density="0" material="robot_white" mesh="Bolt_1"/>
+        <geom pos="-0.0504 0 -0.0228" type="mesh" material="robot_white" mesh="Bolt_1"/>
+      </body>
+    </body>
+  </worldbody>
+
+  <actuator>
+    <position name="position_revolute_3" joint="Revolute 3" kp="3.0" ctrlrange="-3.14159265359 3.14159265359" forcelimited="true" forcerange="-6 6"/>
+  </actuator>
+</mujoco>
