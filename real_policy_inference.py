@@ -68,7 +68,6 @@ from mjlab.rl import MjlabOnPolicyRunner, RslRlVecEnvWrapper
 from mjlab.tasks.inverse import inverse_env_cfg as inv_cfg
 from mjlab.tasks.registry import load_env_cfg, load_rl_cfg, load_runner_cls
 
-
 TASK_ID = "Mjlab-Inverse-Balance"
 OBS_DIM = 8
 HISTORY_LENGTH = 2
@@ -76,6 +75,21 @@ POLICY_INPUT_DIM = OBS_DIM * HISTORY_LENGTH
 ACTION_SCALE_RAD = 0.5 * math.pi
 CAN_FRAME_FORMAT = "=IB3x8s"
 CAN_FRAME_SIZE = struct.calcsize(CAN_FRAME_FORMAT)
+
+# inverse_env_cfg.py의 observations["actor"] 항목 순서(cylinder_angle,
+# cylinder_angle_periodic, pole_angle, joint_vel, last_action)와 각 항목의
+# 차원에 맞춘 슬라이스. mjlab의 ObservationManager는 history_length를 8차원
+# 전체가 아니라 "항목별로" 적용한 뒤(각 항목마다 [t-1, t] 스택) 그 항목들을
+# 이어붙이므로, 여기서도 항목 단위로 [t-1, t]를 묶어야 한다 (단순히
+# [obs(t-1) 8개 전체, obs(t) 8개 전체]로 이어붙이면 학습 때와 순서가 달라져
+# 신경망이 엉뚱한 값을 받게 된다).
+_OBS_TERM_SLICES = (
+  slice(0, 1),  # cylinder_angle
+  slice(1, 3),  # cylinder_angle_periodic (cos, sin)
+  slice(3, 5),  # pole_angle (cos, sin)
+  slice(5, 7),  # joint_vel (cylinder_vel, pole_vel)
+  slice(7, 8),  # last_action
+)
 
 
 @dataclass(frozen=True)
@@ -222,19 +236,22 @@ class InverseRealPolicy:
     return obs
 
   def build_policy_input(self, meas: RealMeasurement) -> torch.Tensor:
-    """history_length=2 규칙에 맞춰 [previous_obs, current_obs]를 만든다."""
+    """observation_manager.py와 동일하게, 항목별로 [t-1, t]를 묶은 뒤
+    그 항목들을 이어붙여 16차원 입력을 만든다 (_OBS_TERM_SLICES 참고)."""
     obs = self.build_single_observation(meas)
 
     if not self._history:
-      # 첫 스텝은 이전값이 없으므로 동일한 obs로 history를 채운다.
+      # 첫 스텝은 이전값이 없으므로 동일한 obs로 history를 채운다
+      # (mjlab의 CircularBuffer도 첫 append 시 전체를 backfill한다).
       self._history.append(obs.clone())
       self._history.append(obs.clone())
     else:
       self._history.append(obs.clone())
-      while len(self._history) < HISTORY_LENGTH:
-        self._history.appendleft(obs.clone())
 
-    stacked = torch.cat(list(self._history), dim=0)
+    obs_prev, obs_cur = self._history[0], self._history[1]
+    stacked = torch.cat(
+      [torch.cat([obs_prev[s], obs_cur[s]]) for s in _OBS_TERM_SLICES]
+    )
     return stacked.unsqueeze(0)  # (1, 16)
 
   def infer(self, meas: RealMeasurement) -> dict[str, float]:
@@ -242,7 +259,7 @@ class InverseRealPolicy:
     policy_input = self.build_policy_input(meas)
 
     with torch.no_grad():
-      action_tensor = self._policy(policy_input)
+      action_tensor = self._policy({"actor": policy_input})
 
     action = float(action_tensor.squeeze().item())
     action = max(-1.0, min(1.0, action))
@@ -300,7 +317,9 @@ class InverseCanDriver:
   def enable(self) -> None:
     if self.ids.enable_command is None:
       return
-    self.transport.send(CanFrame(can_id=self.ids.enable_command, data=self._encode_enable()))
+    self.transport.send(
+      CanFrame(can_id=self.ids.enable_command, data=self._encode_enable())
+    )
 
   def disable(self) -> None:
     if self.ids.disable_command is None:
@@ -468,8 +487,7 @@ def _run_can_loop(cfg: MainConfig) -> None:
 
       driver.send_target_angle_deg(result["target_angle_deg"])
       print(
-        "cyl={:+8.3f} deg  pole={:+8.3f} deg  "
-        "cmd={:+8.3f} deg  act={:+6.3f}".format(
+        "cyl={:+8.3f} deg  pole={:+8.3f} deg  cmd={:+8.3f} deg  act={:+6.3f}".format(
           meas.cylinder_angle_deg,
           meas.pole_angle_deg,
           result["target_angle_deg"],

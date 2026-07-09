@@ -12,9 +12,8 @@ import torch
 from mjlab.actuator.xml_actuator import XmlActuatorCfg
 from mjlab.entity import Entity, EntityArticulationInfoCfg, EntityCfg
 from mjlab.envs import ManagerBasedRlEnvCfg
+from mjlab.envs.mdp import dr
 from mjlab.envs.mdp import (
-  action_acc_l2,
-  action_rate_l2,
   apply_body_impulse,
   last_action,
   time_out,
@@ -26,6 +25,7 @@ from mjlab.managers.observation_manager import (
   ObservationGroupCfg,
   ObservationTermCfg,
 )
+from mjlab.managers.metrics_manager import MetricsTermCfg
 from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.managers.termination_manager import TerminationTermCfg
@@ -50,13 +50,21 @@ _JOINTS_CFG = SceneEntityCfg(
 _CYLINDER_CFG = SceneEntityCfg("inverse", joint_names=("Revolute 3",))
 _POLE_CFG = SceneEntityCfg("inverse", joint_names=("Revolute 5",))
 _POLE_BODY_CFG = SceneEntityCfg("inverse", body_names=("BoldHolder_1",))
+_POLE_INERTIA_BODY_CFG = SceneEntityCfg("inverse", body_names=("BoldHolder_1",))
 
 _TARGET_POLE_ANGLE = math.pi
 _MAX_CYLINDER_ROTATION = 3.0 * math.pi
 _CYLINDER_TERMINATION_ROTATION = 4.0 * math.pi
+_CYLINDER_TERMINATION_SPEED = math.radians(2000.0)
+_CYLINDER_CHATTER_ANGLE_RANGE = math.radians(5.0)
+_CYLINDER_CHATTER_REVERSALS_PER_SEC = 3
+_CYLINDER_CHATTER_UPRIGHT_EXEMPTION = math.radians(30.0)
 _VEL_OBS_SCALE = 30.0
-_BALANCE_START_PROBABILITY = 0.2
+_BALANCE_START_PROBABILITY = 0.1
 _BALANCE_HOLD_THRESHOLD = math.radians(30.0)
+_UPPER_SWING_THRESHOLD = math.radians(70.0)
+_UPRIGHT_REACHED_THRESHOLD = math.radians(10.0)
+_LOWER_SWING_SPEED_TARGET = math.radians(220.0)
 
 
 def _get_spec() -> mujoco.MjSpec:
@@ -127,23 +135,35 @@ def scaled_joint_vel(
 def pole_upright_reward(
   env: ManagerBasedRlEnv,
   pole_cfg: SceneEntityCfg = _POLE_CFG,
-  cylinder_cfg: SceneEntityCfg = _CYLINDER_CFG,
 ) -> torch.Tensor:
-  """Reference-style swing-up reward with a soft cylinder centering factor."""
+  """Reward pole height, rising early while still maxing at upright."""
   asset: Entity = env.scene[pole_cfg.name]
   pole_angle = asset.data.joint_pos[:, pole_cfg.joint_ids].squeeze(-1)
-  cylinder_angle = asset.data.joint_pos[:, cylinder_cfg.joint_ids].squeeze(-1)
   pole_error = torch.atan2(
     torch.sin(pole_angle - _TARGET_POLE_ANGLE),
     torch.cos(pole_angle - _TARGET_POLE_ANGLE),
   )
-  pole_reward = 0.5 * (torch.cos(pole_error) + 1.0)
+  pole_lift = 0.5 * (torch.cos(pole_error) + 1.0)
+  return torch.sqrt(torch.clamp(pole_lift, min=0.0))
 
-  # Similar in spirit to the reference theta_reward: keep useful swing-up motion
-  # while discouraging the motor axis from drifting far from the origin.
-  normalized = torch.clamp(cylinder_angle / _MAX_CYLINDER_ROTATION, -1.0, 1.0)
-  cylinder_reward = 1.0 - normalized.square()
-  return pole_reward * cylinder_reward
+
+def pole_lift_angle_deg_metric(
+  env: ManagerBasedRlEnv,
+  pole_cfg: SceneEntityCfg = _POLE_CFG,
+) -> torch.Tensor:
+  """Pole lift angle in degrees: 0 down, 180 upright."""
+  asset: Entity = env.scene[pole_cfg.name]
+  pole_angle = asset.data.joint_pos[:, pole_cfg.joint_ids].squeeze(-1)
+  pole_lift = 0.5 * (1.0 - torch.cos(pole_angle))
+  return torch.rad2deg(torch.acos(torch.clamp(1.0 - 2.0 * pole_lift, -1.0, 1.0)))
+
+
+def pole_upright_weighted_metric(
+  env: ManagerBasedRlEnv,
+  pole_cfg: SceneEntityCfg = _POLE_CFG,
+) -> torch.Tensor:
+  """Current weighted pole_upright value used for quick TensorBoard reading."""
+  return 24.0 * pole_upright_reward(env, pole_cfg=pole_cfg)
 
 
 def pole_balance_bonus(
@@ -190,36 +210,93 @@ def pole_slow_reward(
   return upright_gate * torch.exp(-0.05 * pole_vel.square())
 
 
-def cylinder_center_reward(
+def lower_swing_reward(
   env: ManagerBasedRlEnv,
+  pole_cfg: SceneEntityCfg = _POLE_CFG,
+) -> torch.Tensor:
+  """Reward motion that actually increases pole height in the lower swing-up zone."""
+  asset: Entity = env.scene[pole_cfg.name]
+  pole_angle = asset.data.joint_pos[:, pole_cfg.joint_ids].squeeze(-1)
+  pole_vel = asset.data.joint_vel[:, pole_cfg.joint_ids].squeeze(-1)
+
+  # 0 at hanging down, 1 near upright.
+  pole_lift = 0.5 * (1.0 - torch.cos(pole_angle))
+  lower_zone_gate = torch.sigmoid(14.0 * (0.45 - pole_lift))
+
+  height_increase_rate = torch.relu(torch.sin(pole_angle) * pole_vel)
+  pole_motion_reward = torch.tanh(height_increase_rate / _LOWER_SWING_SPEED_TARGET)
+
+  return lower_zone_gate * pole_motion_reward
+
+
+def coordinated_swing_reward(
+  env: ManagerBasedRlEnv,
+  pole_cfg: SceneEntityCfg = _POLE_CFG,
   cylinder_cfg: SceneEntityCfg = _CYLINDER_CFG,
 ) -> torch.Tensor:
-  """Very soft preference for staying near the starting angle."""
-  asset: Entity = env.scene[cylinder_cfg.name]
-  cylinder_angle = asset.data.joint_pos[:, cylinder_cfg.joint_ids].squeeze(-1)
-  normalized = cylinder_angle / _MAX_CYLINDER_ROTATION
-  return torch.exp(-0.25 * normalized.square())
-
-
-def cylinder_over_rotation(
-  env: ManagerBasedRlEnv,
-  cylinder_cfg: SceneEntityCfg = _CYLINDER_CFG,
-) -> torch.Tensor:
-  """Penalty after the actuated cylinder exceeds 1.5 turns in either direction."""
-  asset: Entity = env.scene[cylinder_cfg.name]
-  cylinder_angle = asset.data.joint_pos[:, cylinder_cfg.joint_ids].squeeze(-1)
-  excess = torch.clamp(torch.abs(cylinder_angle) - _MAX_CYLINDER_ROTATION, min=0.0)
-  return excess.square()
-
-
-def cylinder_speed_l2(
-  env: ManagerBasedRlEnv,
-  cylinder_cfg: SceneEntityCfg = _CYLINDER_CFG,
-) -> torch.Tensor:
-  """Squared speed of the actuated cylinder."""
-  asset: Entity = env.scene[cylinder_cfg.name]
+  """Reward opposite cylinder/pole motion only in the lower swing region."""
+  asset: Entity = env.scene[pole_cfg.name]
+  pole_angle = asset.data.joint_pos[:, pole_cfg.joint_ids].squeeze(-1)
+  pole_vel = asset.data.joint_vel[:, pole_cfg.joint_ids].squeeze(-1)
   cylinder_vel = asset.data.joint_vel[:, cylinder_cfg.joint_ids].squeeze(-1)
-  return cylinder_vel.square()
+
+  pole_error = torch.atan2(
+    torch.sin(pole_angle - _TARGET_POLE_ANGLE),
+    torch.cos(pole_angle - _TARGET_POLE_ANGLE),
+  )
+  upper_region = (torch.abs(pole_error) < _UPPER_SWING_THRESHOLD).float()
+  lower_region = 1.0 - upper_region
+  opposite_direction = (pole_vel * cylinder_vel < 0.0).float()
+  pole_motion = torch.tanh(torch.abs(pole_vel) / _LOWER_SWING_SPEED_TARGET)
+  cylinder_motion = torch.tanh(torch.abs(cylinder_vel) / _LOWER_SWING_SPEED_TARGET)
+  return lower_region * opposite_direction * pole_motion * cylinder_motion
+
+
+def upper_dwell_reward(
+  env: ManagerBasedRlEnv,
+  pole_cfg: SceneEntityCfg = _POLE_CFG,
+) -> torch.Tensor:
+  """Reward staying in the upper swing region."""
+  asset: Entity = env.scene[pole_cfg.name]
+  pole_angle = asset.data.joint_pos[:, pole_cfg.joint_ids].squeeze(-1)
+  pole_error = torch.atan2(
+    torch.sin(pole_angle - _TARGET_POLE_ANGLE),
+    torch.cos(pole_angle - _TARGET_POLE_ANGLE),
+  )
+  return (torch.abs(pole_error) < _UPPER_SWING_THRESHOLD).float()
+
+
+class post_upright_pole_speed_l2:
+  """Penalize fast pole motion after the pole has reached upright once."""
+
+  def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+    del cfg
+    self._has_reached_upright = torch.zeros(
+      env.num_envs, device=env.device, dtype=torch.bool
+    )
+
+  def __call__(
+    self,
+    env: ManagerBasedRlEnv,
+    pole_cfg: SceneEntityCfg = _POLE_CFG,
+    reached_threshold_rad: float = _UPRIGHT_REACHED_THRESHOLD,
+    speed_scale: float = _LOWER_SWING_SPEED_TARGET,
+  ) -> torch.Tensor:
+    asset: Entity = env.scene[pole_cfg.name]
+    pole_angle = asset.data.joint_pos[:, pole_cfg.joint_ids].squeeze(-1)
+    pole_vel = asset.data.joint_vel[:, pole_cfg.joint_ids].squeeze(-1)
+    pole_error = torch.atan2(
+      torch.sin(pole_angle - _TARGET_POLE_ANGLE),
+      torch.cos(pole_angle - _TARGET_POLE_ANGLE),
+    )
+    self._has_reached_upright |= torch.abs(pole_error) < reached_threshold_rad
+    normalized_speed = pole_vel / speed_scale
+    return self._has_reached_upright.float() * normalized_speed.square()
+
+  def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
+    if env_ids is None:
+      env_ids = slice(None)
+    self._has_reached_upright[env_ids] = False
 
 
 def cylinder_rotation_limit(
@@ -230,6 +307,98 @@ def cylinder_rotation_limit(
   asset: Entity = env.scene[cylinder_cfg.name]
   cylinder_angle = asset.data.joint_pos[:, cylinder_cfg.joint_ids].squeeze(-1)
   return torch.abs(cylinder_angle) > _CYLINDER_TERMINATION_ROTATION
+
+
+def cylinder_speed_limit(
+  env: ManagerBasedRlEnv,
+  cylinder_cfg: SceneEntityCfg = _CYLINDER_CFG,
+) -> torch.Tensor:
+  """Terminate when the actuated cylinder speed exceeds the safety limit."""
+  asset: Entity = env.scene[cylinder_cfg.name]
+  cylinder_vel = asset.data.joint_vel[:, cylinder_cfg.joint_ids].squeeze(-1)
+  return torch.abs(cylinder_vel) > _CYLINDER_TERMINATION_SPEED
+
+
+class cylinder_chatter_limit:
+  """Terminate if the motor axis jitters in a tiny range away from upright."""
+
+  def __init__(self, cfg: TerminationTermCfg, env: ManagerBasedRlEnv):
+    del cfg
+    self._window_steps = max(1, int(round(1.0 / env.step_dt)))
+    self._step_count = torch.zeros(env.num_envs, device=env.device, dtype=torch.long)
+    self._reversal_count = torch.zeros(env.num_envs, device=env.device, dtype=torch.long)
+    self._last_vel_sign = torch.zeros(env.num_envs, device=env.device)
+    self._last_reversal_angle = torch.full(
+      (env.num_envs,), float("nan"), device=env.device
+    )
+
+  def __call__(
+    self,
+    env: ManagerBasedRlEnv,
+    cylinder_cfg: SceneEntityCfg = _CYLINDER_CFG,
+    pole_cfg: SceneEntityCfg = _POLE_CFG,
+    angle_range_rad: float = _CYLINDER_CHATTER_ANGLE_RANGE,
+    reversals_per_sec: int = _CYLINDER_CHATTER_REVERSALS_PER_SEC,
+    upright_exemption_rad: float = _CYLINDER_CHATTER_UPRIGHT_EXEMPTION,
+    min_speed_rad_s: float = math.radians(1.0),
+  ) -> torch.Tensor:
+    asset: Entity = env.scene[cylinder_cfg.name]
+    cylinder_angle = asset.data.joint_pos[:, cylinder_cfg.joint_ids].squeeze(-1)
+    cylinder_vel = asset.data.joint_vel[:, cylinder_cfg.joint_ids].squeeze(-1)
+    pole_angle = asset.data.joint_pos[:, pole_cfg.joint_ids].squeeze(-1)
+
+    self._step_count += 1
+
+    vel_sign = torch.sign(cylinder_vel)
+    vel_sign = torch.where(
+      torch.abs(cylinder_vel) > min_speed_rad_s,
+      vel_sign,
+      torch.zeros_like(vel_sign),
+    )
+    reversed_direction = (
+      (vel_sign != 0.0)
+      & (self._last_vel_sign != 0.0)
+      & (vel_sign != self._last_vel_sign)
+    )
+    has_last_reversal = torch.isfinite(self._last_reversal_angle)
+    reversal_angle_delta = torch.abs(cylinder_angle - self._last_reversal_angle)
+    small_reversal = reversed_direction & (
+      (~has_last_reversal) | (reversal_angle_delta < angle_range_rad)
+    )
+    self._reversal_count += small_reversal.long()
+    self._last_reversal_angle = torch.where(
+      reversed_direction,
+      cylinder_angle,
+      self._last_reversal_angle,
+    )
+    self._last_vel_sign = torch.where(vel_sign != 0.0, vel_sign, self._last_vel_sign)
+
+    window_done = self._step_count >= self._window_steps
+    pole_error = torch.atan2(
+      torch.sin(pole_angle - _TARGET_POLE_ANGLE),
+      torch.cos(pole_angle - _TARGET_POLE_ANGLE),
+    )
+    upright_exempted = torch.abs(pole_error) < float(upright_exemption_rad)
+    terminate = (
+      (self._reversal_count >= int(reversals_per_sec))
+      & ~upright_exempted
+    )
+
+    self._reset_windows(window_done)
+    return terminate
+
+  def _reset_windows(self, env_ids: torch.Tensor) -> None:
+    self._step_count[env_ids] = 0
+    self._reversal_count[env_ids] = 0
+    self._last_reversal_angle[env_ids] = float("nan")
+
+  def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
+    if env_ids is None:
+      env_ids = slice(None)
+    self._step_count[env_ids] = 0
+    self._reversal_count[env_ids] = 0
+    self._last_vel_sign[env_ids] = 0.0
+    self._last_reversal_angle[env_ids] = float("nan")
 
 
 def reset_swingup_balance_curriculum(
@@ -365,7 +534,6 @@ def _make_env_cfg() -> ManagerBasedRlEnvCfg:
       entity_name="inverse",
       actuator_names=("Revolute 3",),
       scale=0.5 * math.pi,
-      clip={"Revolute 3": (-0.5 * math.pi, 0.5 * math.pi)},
     ),
   }
 
@@ -378,12 +546,26 @@ def _make_env_cfg() -> ManagerBasedRlEnvCfg:
         "balance_start_probability": _BALANCE_START_PROBABILITY,
       },
     ),
+    "pole_inertia_disturbance": EventTermCfg(
+      func=dr.pseudo_inertia,
+      mode="reset",
+      params={
+        "asset_cfg": _POLE_INERTIA_BODY_CFG,
+        # 에피소드마다 BoldHolder_1의 질량/관성 특성을 다시 샘플링해서
+        # 조립 오차, CAD 오차, 실제 부품 편차에 더 강하게 학습시킨다.
+        "alpha_range": (-0.06, 0.06),
+        "d_range": (-0.03, 0.03),
+        "t1_range": (-0.001, 0.001),
+        "t2_range": (-0.001, 0.001),
+        "t3_range": (-0.004, 0.004),
+      },
+    ),
     "pole_tip_disturbance": EventTermCfg(
       func=apply_body_impulse,
       mode="step",
       params={
         "asset_cfg": _POLE_BODY_CFG,
-        "force_range": (-0.05, 0.05),
+        "force_range": (-0.10, 0.10),
         "torque_range": (0.0, 0.0),
         "duration_s": (0.01, 0.03),
         "cooldown_s": (0.20, 0.60),
@@ -395,46 +577,46 @@ def _make_env_cfg() -> ManagerBasedRlEnvCfg:
   rewards = {
     "pole_upright": RewardTermCfg(
       func=pole_upright_reward,
-      weight=8.0,
+      weight=24.0,
+      params={"pole_cfg": _POLE_CFG},
+    ),
+    "coordinated_swing": RewardTermCfg(
+      func=coordinated_swing_reward,
+      weight=6.0,
       params={"pole_cfg": _POLE_CFG, "cylinder_cfg": _CYLINDER_CFG},
+    ),
+    "upper_dwell": RewardTermCfg(
+      func=upper_dwell_reward,
+      weight=12.0,
+      params={"pole_cfg": _POLE_CFG},
     ),
     "pole_balance_bonus": RewardTermCfg(
       func=pole_balance_bonus,
-      weight=8.0,
+      weight=12.0,
       params={"pole_cfg": _POLE_CFG},
     ),
     "pole_hold_30deg": RewardTermCfg(
       func=pole_hold_30deg_reward,
-      weight=4.0,
+      weight=48.0,
       params={"pole_cfg": _POLE_CFG},
     ),
-    "pole_slow": RewardTermCfg(
-      func=pole_slow_reward,
-      weight=1.0,
+  }
+
+  metrics = {
+    "max_pole_lift_angle_deg": MetricsTermCfg(
+      func=pole_lift_angle_deg_metric,
       params={"pole_cfg": _POLE_CFG},
+      reduce="max",
     ),
-    "cylinder_center": RewardTermCfg(
-      func=cylinder_center_reward,
-      weight=0.03,
-      params={"cylinder_cfg": _CYLINDER_CFG},
+    "max_pole_upright_raw": MetricsTermCfg(
+      func=pole_upright_reward,
+      params={"pole_cfg": _POLE_CFG},
+      reduce="max",
     ),
-    "cylinder_over_rotation": RewardTermCfg(
-      func=cylinder_over_rotation,
-      weight=-0.1,
-      params={"cylinder_cfg": _CYLINDER_CFG},
-    ),
-    "cylinder_speed": RewardTermCfg(
-      func=cylinder_speed_l2,
-      weight=-0.001,
-      params={"cylinder_cfg": _CYLINDER_CFG},
-    ),
-    "action_rate": RewardTermCfg(
-      func=action_rate_l2,
-      weight=-0.006,
-    ),
-    "action_acc": RewardTermCfg(
-      func=action_acc_l2,
-      weight=-0.0015,
+    "max_pole_upright_weighted": MetricsTermCfg(
+      func=pole_upright_weighted_metric,
+      params={"pole_cfg": _POLE_CFG},
+      reduce="max",
     ),
   }
 
@@ -444,12 +626,18 @@ def _make_env_cfg() -> ManagerBasedRlEnvCfg:
       func=cylinder_rotation_limit,
       params={"cylinder_cfg": _CYLINDER_CFG},
     ),
-    "pole_clear_drop": TerminationTermCfg(
-      func=terminate_after_clear_drop,
+    "cylinder_speed_limit": TerminationTermCfg(
+      func=cylinder_speed_limit,
+      params={"cylinder_cfg": _CYLINDER_CFG},
+    ),
+    "cylinder_chatter_limit": TerminationTermCfg(
+      func=cylinder_chatter_limit,
       params={
+        "cylinder_cfg": _CYLINDER_CFG,
         "pole_cfg": _POLE_CFG,
-        "reached_threshold_deg": 60.0,
-        "drop_threshold_deg": 60.0,
+        "angle_range_rad": _CYLINDER_CHATTER_ANGLE_RANGE,
+        "reversals_per_sec": _CYLINDER_CHATTER_REVERSALS_PER_SEC,
+        "upright_exemption_rad": _CYLINDER_CHATTER_UPRIGHT_EXEMPTION,
       },
     ),
   }
@@ -465,6 +653,7 @@ def _make_env_cfg() -> ManagerBasedRlEnvCfg:
     actions=actions,
     events=events,
     rewards=rewards,
+    metrics=metrics,
     terminations=terminations,
     viewer=ViewerConfig(
       origin_type=ViewerConfig.OriginType.WORLD,
@@ -503,8 +692,8 @@ def inverse_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
       obs_normalization=False,
       distribution_cfg={
         "class_name": "GaussianDistribution",
-        "init_std": 0.8,
-        "std_type": "scalar",
+        "init_std": 1.0,
+        "std_type": "log",
       },
     ),
     critic=RslRlModelCfg(
@@ -516,7 +705,7 @@ def inverse_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
       value_loss_coef=1.0,
       use_clipped_value_loss=True,
       clip_param=0.2,
-      entropy_coef=0.005,
+      entropy_coef=0.008,
       num_learning_epochs=3,
       num_mini_batches=4,
       learning_rate=3.0e-4,
@@ -529,5 +718,5 @@ def inverse_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
     experiment_name="inverse_balance",
     save_interval=50,
     num_steps_per_env=64,
-    max_iterations=1000,
+    max_iterations=2000,
   )
