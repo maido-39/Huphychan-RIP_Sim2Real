@@ -64,9 +64,7 @@ def _get_spec() -> mujoco.MjSpec:
 
 
 _INVERSE_ARTICULATION = EntityArticulationInfoCfg(
-  actuators=(
-    XmlActuatorCfg(target_names_expr=("Revolute 3",)),
-  ),
+  actuators=(XmlActuatorCfg(target_names_expr=("Revolute 3",)),),
 )
 
 _INVERSE_INIT = EntityCfg.InitialStateCfg(
