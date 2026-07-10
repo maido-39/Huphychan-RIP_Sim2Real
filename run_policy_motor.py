@@ -95,8 +95,8 @@ class RunPolicyMotorConfig:
   # 제어 루프 설정
   control_hz: float = 50.0
   state_read_hz: float = 200.0
-  kp: float = 3.0  # K_P 값
-  kd: float = 0.0  # K_D 값
+  kp: float = 16.5  # K_P 값
+  kd: float = 1.0  # K_D 값
   velocity_limit_deg_s: float = 0.0
   torque_limit_nm: float = 0.0
   encoder_baud: int = 115200
