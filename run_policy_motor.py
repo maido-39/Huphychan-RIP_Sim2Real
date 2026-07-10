@@ -41,6 +41,8 @@ uv run python src/mjlab/tasks/inverse/run_policy_motor.py \
   --motor-id 8 \
   --channel can0 \
   --encoder-port /dev/ttyACM0 \
+  --control-hz 50 \
+  --state-read-hz 200 \
   --action-scale-multiplier 0.2
 ```
 """
@@ -91,7 +93,7 @@ class RunPolicyMotorConfig:
   pole_zero_deg: float = 0.0
 
   # 제어 루프 설정
-  control_hz: float = 200.0
+  control_hz: float = 50.0
   state_read_hz: float = 200.0
   kp: float = 3.0  # K_P 값
   kd: float = 0.0  # K_D 값
@@ -99,6 +101,8 @@ class RunPolicyMotorConfig:
   torque_limit_nm: float = 0.0
   encoder_baud: int = 115200
   action_scale_multiplier: float = 0.2
+  pole_pll_kp: float = 80.0
+  pole_pll_ki: float = 1200.0
 
   # 안전 설정
   max_runtime_s: float = 30.0
@@ -108,6 +112,38 @@ class RunPolicyMotorConfig:
   # 로깅/플롯 설정
   log_dir: str = "logs"
   plot: bool = True
+
+
+class PoleVelocityPll:
+  """PLL-style angular velocity estimator for wrapped encoder angles."""
+
+  def __init__(self, *, kp: float, ki: float):
+    self.kp = float(kp)
+    self.ki = float(ki)
+    self._theta_hat_rad: float | None = None
+    self._omega_hat_rad_s = 0.0
+    self._last_timestamp: float | None = None
+
+  def update(self, *, angle_deg: float, timestamp: float) -> float:
+    theta_meas_rad = math.radians(float(angle_deg))
+
+    if self._theta_hat_rad is None or self._last_timestamp is None:
+      self._theta_hat_rad = theta_meas_rad
+      self._last_timestamp = float(timestamp)
+      self._omega_hat_rad_s = 0.0
+      return 0.0
+
+    dt = max(float(timestamp) - self._last_timestamp, 1e-4)
+    phase_error = math.sin(theta_meas_rad - self._theta_hat_rad)
+
+    self._omega_hat_rad_s += self.ki * phase_error * dt
+    self._theta_hat_rad += (self._omega_hat_rad_s + self.kp * phase_error) * dt
+    self._theta_hat_rad = math.atan2(
+      math.sin(self._theta_hat_rad),
+      math.cos(self._theta_hat_rad),
+    )
+    self._last_timestamp = float(timestamp)
+    return math.degrees(self._omega_hat_rad_s)
 
 
 def _send_mit_position_and_get_reply(
@@ -352,18 +388,21 @@ def run(cfg: RunPolicyMotorConfig) -> None:
           "Pendulum angle is not available from RobotStateReader. "
           "Provide --encoder-port and check the serial encoder stream."
         )
-      pole_vel_deg_s = 0.0
+      pll = getattr(run, "_pole_velocity_pll", None)
+      if pll is None:
+        pll = PoleVelocityPll(kp=cfg.pole_pll_kp, ki=cfg.pole_pll_ki)
+        setattr(run, "_pole_velocity_pll", pll)
 
       encoder_state = (
         reader.encoder_reader.latest if reader.encoder_reader is not None else None
       )
-      previous_encoder_state = getattr(run, "_previous_encoder_state", None)
-      if encoder_state is not None and previous_encoder_state is not None:
-        enc_dt = max(encoder_state.timestamp - previous_encoder_state.timestamp, 1e-4)
-        raw_delta = encoder_state.angle_deg - previous_encoder_state.angle_deg
-        delta_deg = (raw_delta + 180) % 360 - 180  # wrap 경계 최단경로 보정
-        pole_vel_deg_s = delta_deg / enc_dt
-      setattr(run, "_previous_encoder_state", encoder_state)
+      if encoder_state is not None:
+        pole_vel_deg_s = pll.update(
+          angle_deg=encoder_state.angle_deg,
+          timestamp=encoder_state.timestamp,
+        )
+      else:
+        pole_vel_deg_s = 0.0
 
       meas = RealMeasurement(
         cylinder_angle_deg=cylinder_angle_deg,

@@ -56,15 +56,18 @@ _TARGET_POLE_ANGLE = math.pi
 _MAX_CYLINDER_ROTATION = 3.0 * math.pi
 _CYLINDER_TERMINATION_ROTATION = 4.0 * math.pi
 _CYLINDER_TERMINATION_SPEED = math.radians(2000.0)
-_CYLINDER_CHATTER_ANGLE_RANGE = math.radians(5.0)
+_CYLINDER_CHATTER_ANGLE_RANGE = math.radians(10.0)
 _CYLINDER_CHATTER_REVERSALS_PER_SEC = 3
 _CYLINDER_CHATTER_UPRIGHT_EXEMPTION = math.radians(30.0)
 _VEL_OBS_SCALE = 30.0
 _BALANCE_START_PROBABILITY = 0.1
 _BALANCE_HOLD_THRESHOLD = math.radians(30.0)
+_BALANCE_HOLD_MIN_TIME_S = 0.2
+_BALANCE_HOLD_RAMP_TIME_S = 0.8
 _UPPER_SWING_THRESHOLD = math.radians(70.0)
 _UPRIGHT_REACHED_THRESHOLD = math.radians(10.0)
 _LOWER_SWING_SPEED_TARGET = math.radians(220.0)
+_ACTION_DELAY_STEPS = 4
 
 
 def _get_spec() -> mujoco.MjSpec:
@@ -73,7 +76,11 @@ def _get_spec() -> mujoco.MjSpec:
 
 _INVERSE_ARTICULATION = EntityArticulationInfoCfg(
   actuators=(
-    XmlActuatorCfg(target_names_expr=("Revolute 3",)),
+    XmlActuatorCfg(
+      target_names_expr=("Revolute 3",),
+      delay_min_lag=_ACTION_DELAY_STEPS,
+      delay_max_lag=_ACTION_DELAY_STEPS,
+    ),
   ),
 )
 
@@ -180,18 +187,43 @@ def pole_balance_bonus(
   return torch.exp(-12.0 * pole_error.square())
 
 
-def pole_hold_30deg_reward(
-  env: ManagerBasedRlEnv,
-  pole_cfg: SceneEntityCfg = _POLE_CFG,
-) -> torch.Tensor:
-  """Per-step reward for staying inside the practical +/-30 degree balance zone."""
-  asset: Entity = env.scene[pole_cfg.name]
-  pole_angle = asset.data.joint_pos[:, pole_cfg.joint_ids].squeeze(-1)
-  pole_error = torch.atan2(
-    torch.sin(pole_angle - _TARGET_POLE_ANGLE),
-    torch.cos(pole_angle - _TARGET_POLE_ANGLE),
-  )
-  return (torch.abs(pole_error) < _BALANCE_HOLD_THRESHOLD).float()
+class pole_hold_30deg_reward:
+  """Reward only after holding inside +/-30 degrees for a minimum duration."""
+
+  def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+    del cfg
+    self._hold_time_s = torch.zeros(env.num_envs, device=env.device)
+
+  def __call__(
+    self,
+    env: ManagerBasedRlEnv,
+    pole_cfg: SceneEntityCfg = _POLE_CFG,
+    hold_threshold_rad: float = _BALANCE_HOLD_THRESHOLD,
+    min_hold_time_s: float = _BALANCE_HOLD_MIN_TIME_S,
+    ramp_time_s: float = _BALANCE_HOLD_RAMP_TIME_S,
+  ) -> torch.Tensor:
+    asset: Entity = env.scene[pole_cfg.name]
+    pole_angle = asset.data.joint_pos[:, pole_cfg.joint_ids].squeeze(-1)
+    pole_error = torch.atan2(
+      torch.sin(pole_angle - _TARGET_POLE_ANGLE),
+      torch.cos(pole_angle - _TARGET_POLE_ANGLE),
+    )
+    inside_hold_zone = torch.abs(pole_error) < float(hold_threshold_rad)
+    self._hold_time_s = torch.where(
+      inside_hold_zone,
+      self._hold_time_s + float(env.step_dt),
+      torch.zeros_like(self._hold_time_s),
+    )
+    return torch.clamp(
+      (self._hold_time_s - float(min_hold_time_s)) / float(ramp_time_s),
+      min=0.0,
+      max=1.0,
+    )
+
+  def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
+    if env_ids is None:
+      env_ids = slice(None)
+    self._hold_time_s[env_ids] = 0.0
 
 
 def pole_slow_reward(
@@ -587,7 +619,7 @@ def _make_env_cfg() -> ManagerBasedRlEnvCfg:
     ),
     "upper_dwell": RewardTermCfg(
       func=upper_dwell_reward,
-      weight=12.0,
+      weight=2.0,
       params={"pole_cfg": _POLE_CFG},
     ),
     "pole_balance_bonus": RewardTermCfg(
@@ -598,7 +630,12 @@ def _make_env_cfg() -> ManagerBasedRlEnvCfg:
     "pole_hold_30deg": RewardTermCfg(
       func=pole_hold_30deg_reward,
       weight=48.0,
-      params={"pole_cfg": _POLE_CFG},
+      params={
+        "pole_cfg": _POLE_CFG,
+        "hold_threshold_rad": _BALANCE_HOLD_THRESHOLD,
+        "min_hold_time_s": _BALANCE_HOLD_MIN_TIME_S,
+        "ramp_time_s": _BALANCE_HOLD_RAMP_TIME_S,
+      },
     ),
   }
 
@@ -665,7 +702,7 @@ def _make_env_cfg() -> ManagerBasedRlEnvCfg:
     sim=SimulationCfg(
       mujoco=MujocoCfg(timestep=0.005, disableflags=("contact",)),
     ),
-    decimation=1,
+    decimation=4,
     episode_length_s=8.0,
   )
 

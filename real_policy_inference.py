@@ -19,8 +19,9 @@
   -> target_angle_rad = action * (0.5 * pi)
 - 현재 학습 설정 기준 주기:
   -> timestep = 0.005
-  -> decimation = 1
-  -> policy/action update = 200 Hz
+  -> decimation = 4
+  -> policy/action update = 50 Hz
+  -> actuator command delay = 20 ms
 
 실물 설정 요약
 - 실물에서 들어오는 각도 단위가 degree 라면 반드시 rad로 변환
