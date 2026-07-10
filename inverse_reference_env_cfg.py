@@ -1,4 +1,18 @@
-"""Reference-style inverse pendulum task configuration."""
+"""Plain Furuta-reference inverse pendulum task configuration.
+
+This config intentionally keeps the task as close as possible to the
+minimal Furuta sample reward:
+
+    reward = alpha_reward * theta_reward
+
+where:
+    alpha_reward : raise the pendulum
+    theta_reward : keep the motor arm near the origin
+
+No balance curriculum, no sim2real disturbance, no hardware-protection
+termination, no action penalty, no velocity penalty.
+Only time_out is kept so PPO episodes can end normally.
+"""
 
 from __future__ import annotations
 
@@ -20,63 +34,137 @@ from mjlab.tasks.inverse.inverse_env_cfg import (
   _make_env_cfg,
 )
 
-_REFERENCE_REWARD_SCALE = 12.0
+
+# Furuta sample-style reward scale.
+# Reward itself is in [0, 1], so 10~12 정도면 PPO에서 보기 편함.
+_FURUTA_REWARD_SCALE = 12.0
 
 
-def reference_theta_reward(env, cylinder_cfg=_CYLINDER_CFG) -> torch.Tensor:
-  """Reference-like reward that prefers keeping the motor angle near the origin."""
+def furuta_alpha_reward(env, pole_cfg=_POLE_CFG) -> torch.Tensor:
+  """Pendulum swing-up reward.
+
+  Assumption:
+    pole_angle = 0      -> hanging down
+    pole_angle = pi     -> upright
+
+  Reward:
+    down    -> 0
+    upright -> 1
+  """
+  asset: Entity = env.scene[pole_cfg.name]
+  alpha = asset.data.joint_pos[:, pole_cfg.joint_ids].squeeze(-1)
+
+  return 0.5 * (1.0 - torch.cos(alpha))
+
+
+def furuta_theta_reward(env, cylinder_cfg=_CYLINDER_CFG) -> torch.Tensor:
+  """Motor arm centering reward.
+
+  This follows the Furuta sample-style theta reward.
+
+  theta = 0      -> reward near 1
+  theta = ±pi    -> reward near 0
+
+  It discourages solving the task by spinning the motor arm far away
+  from the origin.
+  """
   asset: Entity = env.scene[cylinder_cfg.name]
   theta = asset.data.joint_pos[:, cylinder_cfg.joint_ids].squeeze(-1)
+
   theta_rew = 0.5 * (torch.cos(theta + math.pi) + 1.0)
   return 1.0 - theta_rew.square()
 
 
-def reference_alpha_theta_reward(
+def furuta_alpha_theta_reward(
   env,
   pole_cfg=_POLE_CFG,
   cylinder_cfg=_CYLINDER_CFG,
 ) -> torch.Tensor:
-  """Minimal reference-style swing-up objective: raise pole while centering motor angle."""
-  asset: Entity = env.scene[pole_cfg.name]
-  pole_angle = asset.data.joint_pos[:, pole_cfg.joint_ids].squeeze(-1)
-  alpha_reward = 0.5 * (1.0 - torch.cos(pole_angle))
-  theta_reward = reference_theta_reward(env, cylinder_cfg)
-  return alpha_reward * theta_reward
+  """Plain Furuta reference reward.
+
+  reward = pole swing-up reward * motor centering reward
+  """
+  alpha_rew = furuta_alpha_reward(env, pole_cfg)
+  theta_rew = furuta_theta_reward(env, cylinder_cfg)
+
+  return alpha_rew * theta_rew
 
 
 def inverse_reference_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
-  """Reference reward task plus only the hardware-protection constraints."""
+  """Plain Furuta-reference task.
+
+  Keeps:
+    - base MuJoCo model
+    - base action config
+    - base observation config
+    - reset_curriculum
+    - time_out only
+
+  Removes:
+    - balance-start curriculum
+    - sim2real disturbances
+    - pole clear/drop termination
+    - cylinder rotation limit
+    - cylinder speed limit
+    - cylinder chatter limit
+    - all extra reward terms
+  """
   cfg = _make_env_cfg()
 
-  # Keep the reference task reset distribution: start from the hanging swing-up
-  # region, without balance starts or sim2real disturbances.
+  # ---------------------------------------------------------------------------
+  # Reset: plain Furuta sample style
+  # ---------------------------------------------------------------------------
+  # Start near the hanging-down equilibrium.
+  # No upright/balance starts.
+  reset_event = cfg.events["reset_curriculum"]
+  cfg.events = {
+    "reset_curriculum": reset_event,
+  }
+
   cfg.events["reset_curriculum"].params["balance_start_probability"] = 0.0
   cfg.events["reset_curriculum"].params["cylinder_position_range"] = (-0.01, 0.01)
   cfg.events["reset_curriculum"].params["cylinder_velocity_range"] = (-0.01, 0.01)
   cfg.events["reset_curriculum"].params["swingup_pole_position_range"] = (-0.01, 0.01)
   cfg.events["reset_curriculum"].params["swingup_pole_velocity_range"] = (-0.01, 0.01)
 
-  cfg.events.pop("pole_inertia_disturbance", None)
-  cfg.events.pop("pole_tip_disturbance", None)
-
+  # ---------------------------------------------------------------------------
+  # Reward: only Furuta alpha-theta reward
+  # ---------------------------------------------------------------------------
   cfg.rewards = {
-    "alpha_theta": RewardTermCfg(
-      func=reference_alpha_theta_reward,
-      weight=_REFERENCE_REWARD_SCALE,
-      params={"pole_cfg": _POLE_CFG, "cylinder_cfg": _CYLINDER_CFG},
+    "furuta_alpha_theta": RewardTermCfg(
+      func=furuta_alpha_theta_reward,
+      weight=_FURUTA_REWARD_SCALE,
+      params={
+        "pole_cfg": _POLE_CFG,
+        "cylinder_cfg": _CYLINDER_CFG,
+      },
     ),
   }
 
-  # Keep only physical safety termination from _make_env_cfg():
-  # - time_out
-  # - cylinder_rotation_limit
-  # - cylinder_speed_limit
-  cfg.terminations.pop("pole_clear_drop", None)
+  # ---------------------------------------------------------------------------
+  # Termination: remove all hardware/safety constraints
+  # ---------------------------------------------------------------------------
+  # PPO still needs finite episodes, so keep only time_out.
+  # This removes:
+  #   - cylinder_rotation_limit
+  #   - cylinder_speed_limit
+  #   - cylinder_chatter_limit
+  #   - pole_clear_drop
+  #   - anything else inherited from _make_env_cfg()
+  time_out_term = cfg.terminations.get("time_out", None)
+  cfg.terminations = {}
 
+  if time_out_term is not None:
+    cfg.terminations["time_out"] = time_out_term
+
+  # ---------------------------------------------------------------------------
+  # Play mode
+  # ---------------------------------------------------------------------------
   if play:
     cfg.scene.num_envs = 1
     cfg.episode_length_s = 1e10
     cfg.observations["actor"].enable_corruption = False
+
     cfg.events["reset_curriculum"].params["balance_start_probability"] = 0.0
     cfg.events["reset_curriculum"].params["cylinder_position_range"] = (0.0, 0.0)
     cfg.events["reset_curriculum"].params["cylinder_velocity_range"] = (0.0, 0.0)
@@ -87,6 +175,7 @@ def inverse_reference_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 
 
 def inverse_reference_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
+  """Plain PPO runner for the Furuta-reference task."""
   return RslRlOnPolicyRunnerCfg(
     actor=RslRlModelCfg(
       hidden_dims=(128, 128),
