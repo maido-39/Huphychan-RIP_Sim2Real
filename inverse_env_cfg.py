@@ -62,13 +62,14 @@ _CYLINDER_CHATTER_UPRIGHT_EXEMPTION = math.radians(30.0)
 _VEL_OBS_SCALE = 30.0
 _BALANCE_START_PROBABILITY = 0.1
 _BALANCE_HOLD_THRESHOLD = math.radians(30.0)
-_EXACT_UPRIGHT_BONUS_STD = math.radians(5.0)
+_EXACT_UPRIGHT_BONUS_THRESHOLD = math.radians(30.0)
 _UPPER_SWING_THRESHOLD = math.radians(70.0)
 _UPPER_SPEED_PENALTY_THRESHOLD = math.radians(60.0)
 _UPRIGHT_REACHED_THRESHOLD = math.radians(10.0)
-_POLE_ONE_WAY_ROTATION_LIMIT = 2.0 * math.pi
+_POLE_ONE_WAY_ROTATION_LIMIT = 4.0 * math.pi
 _LOWER_SWING_SPEED_TARGET = math.radians(220.0)
 _ACTION_DELAY_STEPS = 4
+_JOINT5_RANDOMIZATION_SCALE = (0.5, 2.0)
 
 
 def _get_spec() -> mujoco.MjSpec:
@@ -192,17 +193,17 @@ def pole_hold_30deg_reward(
 def exact_upright_bonus(
   env: ManagerBasedRlEnv,
   pole_cfg: SceneEntityCfg = _POLE_CFG,
-  std_rad: float = _EXACT_UPRIGHT_BONUS_STD,
+  active_threshold_rad: float = _EXACT_UPRIGHT_BONUS_THRESHOLD,
 ) -> torch.Tensor:
-  """Large narrow bonus for getting very close to exactly upright."""
+  """Large bonus that ramps up near upright and peaks at 180 degrees."""
   asset: Entity = env.scene[pole_cfg.name]
   pole_angle = asset.data.joint_pos[:, pole_cfg.joint_ids].squeeze(-1)
   pole_error = torch.atan2(
     torch.sin(pole_angle - _TARGET_POLE_ANGLE),
     torch.cos(pole_angle - _TARGET_POLE_ANGLE),
   )
-  normalized_error = pole_error / float(std_rad)
-  return torch.exp(-0.5 * normalized_error.square())
+  normalized_error = torch.abs(pole_error) / float(active_threshold_rad)
+  return torch.clamp(1.0 - normalized_error, min=0.0, max=1.0)
 
 
 def pole_slow_reward(
@@ -621,11 +622,38 @@ def _make_env_cfg() -> ManagerBasedRlEnvCfg:
         "asset_cfg": _POLE_INERTIA_BODY_CFG,
         # 에피소드마다 BoldHolder_1의 질량/관성 특성을 다시 샘플링해서
         # 조립 오차, CAD 오차, 실제 부품 편차에 더 강하게 학습시킨다.
-        "alpha_range": (-0.06, 0.06),
-        "d_range": (-0.03, 0.03),
-        "t1_range": (-0.001, 0.001),
-        "t2_range": (-0.001, 0.001),
-        "t3_range": (-0.004, 0.004),
+        "alpha_range": (-0.10, 0.10),
+        "d_range": (-0.06, 0.06),
+        "t1_range": (-0.002, 0.002),
+        "t2_range": (-0.002, 0.002),
+        "t3_range": (-0.006, 0.006),
+      },
+    ),
+    "pole_joint_damping_randomization": EventTermCfg(
+      func=dr.joint_damping,
+      mode="reset",
+      params={
+        "asset_cfg": _POLE_CFG,
+        "ranges": _JOINT5_RANDOMIZATION_SCALE,
+        "operation": "scale",
+      },
+    ),
+    "pole_joint_frictionloss_randomization": EventTermCfg(
+      func=dr.dof_frictionloss,
+      mode="reset",
+      params={
+        "asset_cfg": _POLE_CFG,
+        "ranges": _JOINT5_RANDOMIZATION_SCALE,
+        "operation": "scale",
+      },
+    ),
+    "pole_joint_armature_randomization": EventTermCfg(
+      func=dr.joint_armature,
+      mode="reset",
+      params={
+        "asset_cfg": _POLE_CFG,
+        "ranges": _JOINT5_RANDOMIZATION_SCALE,
+        "operation": "scale",
       },
     ),
     "pole_tip_disturbance": EventTermCfg(
@@ -633,8 +661,8 @@ def _make_env_cfg() -> ManagerBasedRlEnvCfg:
       mode="step",
       params={
         "asset_cfg": _POLE_BODY_CFG,
-        "force_range": (-0.10, 0.10),
-        "torque_range": (0.0, 0.0),
+        "force_range": (-0.15, 0.15),
+        "torque_range": (-0.002, 0.002),
         "duration_s": (0.01, 0.03),
         "cooldown_s": (0.20, 0.60),
         "body_point_offset": (-0.0504, 0.0, -0.0228),
@@ -645,7 +673,7 @@ def _make_env_cfg() -> ManagerBasedRlEnvCfg:
   rewards = {
     "pole_upright": RewardTermCfg(
       func=pole_upright_reward,
-      weight=36.0,
+      weight=18.0,
       params={"pole_cfg": _POLE_CFG},
     ),
     "coordinated_swing": RewardTermCfg(
@@ -655,7 +683,7 @@ def _make_env_cfg() -> ManagerBasedRlEnvCfg:
     ),
     "pole_hold_30deg": RewardTermCfg(
       func=pole_hold_30deg_reward,
-      weight=30.0,
+      weight=0.0,
       params={
         "pole_cfg": _POLE_CFG,
         "hold_threshold_rad": _BALANCE_HOLD_THRESHOLD,
@@ -666,7 +694,7 @@ def _make_env_cfg() -> ManagerBasedRlEnvCfg:
       weight=80.0,
       params={
         "pole_cfg": _POLE_CFG,
-        "std_rad": _EXACT_UPRIGHT_BONUS_STD,
+        "active_threshold_rad": _EXACT_UPRIGHT_BONUS_THRESHOLD,
       },
     ),
     "upper_region_pole_speed": RewardTermCfg(
