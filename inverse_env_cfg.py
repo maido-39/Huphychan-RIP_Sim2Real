@@ -65,9 +65,11 @@ _BALANCE_HOLD_THRESHOLD = math.radians(30.0)
 _EXACT_UPRIGHT_BONUS_THRESHOLD = math.radians(30.0)
 _UPPER_SWING_THRESHOLD = math.radians(70.0)
 _UPPER_SPEED_PENALTY_THRESHOLD = math.radians(60.0)
+_NEAR_UPRIGHT_SPEED_PENALTY_THRESHOLD = math.radians(20.0)
 _UPRIGHT_REACHED_THRESHOLD = math.radians(10.0)
 _POLE_ONE_WAY_ROTATION_LIMIT = 4.0 * math.pi
 _LOWER_SWING_SPEED_TARGET = math.radians(220.0)
+_NEAR_UPRIGHT_SPEED_TARGET = math.radians(80.0)
 _ACTION_DELAY_STEPS = 4
 _JOINT5_RANDOMIZATION_SCALE = (0.5, 2.0)
 
@@ -281,6 +283,25 @@ def upper_region_pole_speed_penalty(
   upper_region = (torch.abs(pole_error) < float(upper_threshold_rad)).float()
   normalized_speed = torch.tanh(torch.abs(pole_vel) / float(speed_scale))
   return upper_region * normalized_speed
+
+
+def near_upright_pole_speed_penalty(
+  env: ManagerBasedRlEnv,
+  pole_cfg: SceneEntityCfg = _POLE_CFG,
+  near_threshold_rad: float = _NEAR_UPRIGHT_SPEED_PENALTY_THRESHOLD,
+  speed_scale: float = _NEAR_UPRIGHT_SPEED_TARGET,
+) -> torch.Tensor:
+  """Penalize fast pole motion strongly inside the 160~200 degree balance region."""
+  asset: Entity = env.scene[pole_cfg.name]
+  pole_angle = asset.data.joint_pos[:, pole_cfg.joint_ids].squeeze(-1)
+  pole_vel = asset.data.joint_vel[:, pole_cfg.joint_ids].squeeze(-1)
+  pole_error = torch.atan2(
+    torch.sin(pole_angle - _TARGET_POLE_ANGLE),
+    torch.cos(pole_angle - _TARGET_POLE_ANGLE),
+  )
+  near_upright = (torch.abs(pole_error) < float(near_threshold_rad)).float()
+  normalized_speed = torch.tanh(torch.abs(pole_vel) / float(speed_scale))
+  return near_upright * normalized_speed
 
 
 class post_upright_pole_speed_l2:
@@ -613,6 +634,15 @@ def _make_env_cfg() -> ManagerBasedRlEnvCfg:
       params={
         "asset_cfg": _JOINTS_CFG,
         "balance_start_probability": _BALANCE_START_PROBABILITY,
+        "cylinder_position_range": (-math.pi, math.pi),
+        "cylinder_velocity_range": (-0.5, 0.5),
+        "swingup_pole_position_range": (-math.pi, math.pi),
+        "swingup_pole_velocity_range": (-1.0, 1.0),
+        "balance_pole_position_range": (
+          math.pi - math.radians(20.0),
+          math.pi + math.radians(20.0),
+        ),
+        "balance_pole_velocity_range": (-0.5, 0.5),
       },
     ),
     "pole_inertia_disturbance": EventTermCfg(
@@ -706,6 +736,15 @@ def _make_env_cfg() -> ManagerBasedRlEnvCfg:
         "speed_scale": _LOWER_SWING_SPEED_TARGET,
       },
     ),
+    "near_upright_pole_speed": RewardTermCfg(
+      func=near_upright_pole_speed_penalty,
+      weight=-36.0,
+      params={
+        "pole_cfg": _POLE_CFG,
+        "near_threshold_rad": _NEAR_UPRIGHT_SPEED_PENALTY_THRESHOLD,
+        "speed_scale": _NEAR_UPRIGHT_SPEED_TARGET,
+      },
+    ),
   }
 
   metrics = {
@@ -794,6 +833,14 @@ def inverse_balance_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.events["reset_curriculum"].params["cylinder_velocity_range"] = (0.0, 0.0)
     cfg.events["reset_curriculum"].params["swingup_pole_position_range"] = (0.0, 0.0)
     cfg.events["reset_curriculum"].params["swingup_pole_velocity_range"] = (0.0, 0.0)
+    for event_name in (
+      "pole_inertia_disturbance",
+      "pole_joint_damping_randomization",
+      "pole_joint_frictionloss_randomization",
+      "pole_joint_armature_randomization",
+      "pole_tip_disturbance",
+    ):
+      cfg.events.pop(event_name, None)
   return cfg
 
 
