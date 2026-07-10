@@ -42,13 +42,16 @@
 
 ## Action And Command
 
-| Parameter                  | RL/Sim                                  | Measured | Manufacturer |
-| -------------------------- | --------------------------------------- | -------- | ------------ |
-| Real MIT `kp`              | `3.0`                                   |          |    N/A       |
-| Real MIT `kd`              | `0.0`                                   |          |    N/A       |
+## Action And Command
+정책은 MuJoCo actuator kp=2.2, kv=0.6의 응답을 기준으로 학습되었기 때문에, 첫 실기기 배포에서는 Real MIT kp/kd를 조절하여 실기기 모터 응답을 학습 당시 시뮬레이션 응답에 최대한 맞춘다. 만약 실기기가 해당 응답을 안전하게 재현할 수 없다면, 시뮬레이션 actuator 모델을 실기기 응답에 맞게 수정한 뒤 재학습 또는 파인튜닝한다.
+| Parameter                | RL/Sim                      | Measured                                                         | Manufacturer |
+|---                       |---                          |---                                                               |---           |
+| Real motor tracking gain | MIT `kp=3.0`, `kd=0.0`      | real motor response reference; measure step/sine response        | N/A          |
+| Sim motor tracking gain  | actuator `kp=2.2`, `kv=0.6` | tune to match real rise time, overshoot, settling, and phase lag | N/A          |
 
 
 ## Actuated Axis: Revolute 3
+Joint damping은 모터축의 마찰/감쇠, Joint armature는 모터축의 추가 회전관성이다. 둘 다 실물 모터 응답과 시뮬레이션 응답을 맞추기 위한 MuJoCo 물리 튜닝값이다.
 
 | Parameter                  | RL/Sim                                                    | Measured | Manufacturer |
 | -------------------------- | --------------------------------------------------------- | -------- | ------------ |
@@ -57,10 +60,19 @@
 | Joint armature             | `0.0005`                                                  |          |              |
 | Rotor body mass            | `0.053175 kg`                                             | matched  |    N/A       |
 | Rotor diagonal inertia     | `(4.07858e-05, 3.80533e-05, 8.48022e-06)`                 | matched  |    N/A       |
-| Sim actuator `kp`          | `2.2`                                                     |          |              |
-| Sim actuator `kv`          | `0.6`                                                     |          |              |
 
 ## Passive Pole Axis: Revolute 5
+Joint damping
+= 펜듈럼이 흔들릴 때 속도에 비례해서 에너지가 줄어드는 정도
+= free-swing decay 보고 튜닝
+
+Joint frictionloss
+= 아주 느린 속도에서 걸리는 마찰/정지마찰 성향
+= 작은 진폭에서 얼마나 빨리 멈추는지 보고 튜닝
+
+Joint armature
+= 펜듈럼 축에 추가로 걸리는 등가 회전관성
+= free-swing period가 실물과 비슷한지 확인
 
 | Parameter                  | RL/Sim                                                    | Measured                | Manufacturer |
 | -------------------------- | --------------------------------------------------------- | --------                | ------------ |
