@@ -51,6 +51,6 @@
   </worldbody>
 
   <actuator>
-    <position name="position_revolute_3" joint="Revolute 3" kp="8.0" kv="0.15" ctrlrange="-3.14159265359 3.14159265359" forcelimited="true" forcerange="-5 5"/>
+    <position name="position_revolute_3" joint="Revolute 3" kp="8.0" kv="0.3" ctrlrange="-3.14159265359 3.14159265359" forcelimited="true" forcerange="-10 10"/>
   </actuator>
 </mujoco>

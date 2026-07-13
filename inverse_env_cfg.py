@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import math
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -18,7 +19,7 @@ from mjlab.envs.mdp import (
   last_action,
   time_out,
 )
-from mjlab.envs.mdp.actions import JointPositionActionCfg
+from mjlab.envs.mdp.actions import JointPositionAction, JointPositionActionCfg
 from mjlab.managers.action_manager import ActionTermCfg
 from mjlab.managers.event_manager import EventTermCfg
 from mjlab.managers.observation_manager import (
@@ -60,7 +61,7 @@ _CYLINDER_CHATTER_ANGLE_RANGE = math.radians(10.0)
 _CYLINDER_CHATTER_REVERSALS_PER_SEC = 3
 _CYLINDER_CHATTER_UPRIGHT_EXEMPTION = math.radians(30.0)
 _VEL_OBS_SCALE = 30.0
-_BALANCE_START_PROBABILITY = 0.1
+_BALANCE_START_PROBABILITY = 0.4
 _BALANCE_HOLD_THRESHOLD = math.radians(30.0)
 _EXACT_UPRIGHT_BONUS_THRESHOLD = math.radians(30.0)
 _UPPER_SWING_THRESHOLD = math.radians(70.0)
@@ -71,6 +72,10 @@ _POLE_ONE_WAY_ROTATION_LIMIT = 4.0 * math.pi
 _LOWER_SWING_SPEED_TARGET = math.radians(220.0)
 _NEAR_UPRIGHT_SPEED_TARGET = math.radians(80.0)
 _ACTION_DELAY_STEPS = 0
+_CYLINDER_TARGET_RATE_LIMIT = math.radians(2000.0)
+_CYLINDER_TARGET_DELTA_LIMIT = _CYLINDER_TARGET_RATE_LIMIT * 0.02
+_CYLINDER_TARGET_ACCEL_LIMIT = math.radians(20000.0)
+_CYLINDER_TARGET_DELTA_CHANGE_LIMIT = _CYLINDER_TARGET_ACCEL_LIMIT * 0.02 * 0.02
 _JOINT5_RANDOMIZATION_SCALE = (0.5, 2.0)
 
 
@@ -101,6 +106,58 @@ def _get_inverse_cfg() -> EntityCfg:
     articulation=_INVERSE_ARTICULATION,
     init_state=_INVERSE_INIT,
   )
+
+
+@dataclass(kw_only=True)
+class RateLimitedJointPositionActionCfg(JointPositionActionCfg):
+  """Joint position action with a per-policy-step target slew-rate limit."""
+
+  max_delta: float = _CYLINDER_TARGET_DELTA_LIMIT
+  max_delta_change: float = _CYLINDER_TARGET_DELTA_CHANGE_LIMIT
+
+  def build(self, env: ManagerBasedRlEnv) -> "RateLimitedJointPositionAction":
+    return RateLimitedJointPositionAction(self, env)
+
+
+class RateLimitedJointPositionAction(JointPositionAction):
+  """Limit commanded joint-position target changes before writing to actuators."""
+
+  cfg: RateLimitedJointPositionActionCfg
+
+  def __init__(self, cfg: RateLimitedJointPositionActionCfg, env: ManagerBasedRlEnv):
+    super().__init__(cfg=cfg, env=env)
+    self._limited_target = self._entity.data.joint_pos[:, self._target_ids].clone()
+    self._target_delta = torch.zeros_like(self._limited_target)
+
+  def process_actions(self, actions: torch.Tensor):
+    super().process_actions(actions)
+    desired_target = self._processed_actions
+    desired_delta = torch.clamp(
+      desired_target - self._limited_target,
+      min=-float(self.cfg.max_delta),
+      max=float(self.cfg.max_delta),
+    )
+    delta_step = torch.clamp(
+      desired_delta - self._target_delta,
+      min=-float(self.cfg.max_delta_change),
+      max=float(self.cfg.max_delta_change),
+    )
+    self._target_delta = torch.clamp(
+      self._target_delta + delta_step,
+      min=-float(self.cfg.max_delta),
+      max=float(self.cfg.max_delta),
+    )
+    self._limited_target = self._limited_target + self._target_delta
+    self._processed_actions = self._limited_target.clone()
+
+  def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
+    super().reset(env_ids)
+    if env_ids is None:
+      env_ids = slice(None)
+    self._limited_target[env_ids] = self._entity.data.joint_pos[env_ids].index_select(
+      dim=1, index=self._target_ids
+    )
+    self._target_delta[env_ids] = 0.0
 
 
 def pole_angle_cos_sin(
@@ -620,10 +677,12 @@ def _make_env_cfg() -> ManagerBasedRlEnvCfg:
   }
 
   actions: dict[str, ActionTermCfg] = {
-    "position": JointPositionActionCfg(
+    "position": RateLimitedJointPositionActionCfg(
       entity_name="inverse",
       actuator_names=("Revolute 3",),
-      scale=0.5 * math.pi,
+      scale=math.radians(20.0),
+      max_delta=_CYLINDER_TARGET_DELTA_LIMIT,
+      max_delta_change=_CYLINDER_TARGET_DELTA_CHANGE_LIMIT,
     ),
   }
 
@@ -703,7 +762,7 @@ def _make_env_cfg() -> ManagerBasedRlEnvCfg:
   rewards = {
     "pole_upright": RewardTermCfg(
       func=pole_upright_reward,
-      weight=18.0,
+      weight=9.0,
       params={"pole_cfg": _POLE_CFG},
     ),
     "coordinated_swing": RewardTermCfg(

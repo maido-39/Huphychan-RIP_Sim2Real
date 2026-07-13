@@ -43,6 +43,8 @@ CSV_HEADER = [
   "processed_action_deg",
   "joint_pos_target_rad",
   "joint_pos_target_deg",
+  "joint_pos_target_vel_rad_s",
+  "joint_pos_target_vel_deg_s",
   "actuator_force_pre_nm",
   "actuator_force_post_nm",
   "qfrc_actuator_pre_nm",
@@ -240,6 +242,7 @@ def run(cfg: LogPlayTrackingConfig) -> Path:
     writer.writerow(CSV_HEADER)
 
     physics_step = 0
+    last_policy_target_rad: float | None = None
     for policy_step in range(max_policy_steps):
       with torch.inference_mode():
         action = policy(obs)
@@ -253,6 +256,11 @@ def run(cfg: LogPlayTrackingConfig) -> Path:
 
       raw_action = _to_float(action_term.raw_action[:, 0])
       processed_action_rad = _to_float(_get_processed_action(action_term)[:, 0])
+      if last_policy_target_rad is None:
+        joint_pos_target_vel_rad_s = 0.0
+      else:
+        joint_pos_target_vel_rad_s = (processed_action_rad - last_policy_target_rad) / policy_dt
+      last_policy_target_rad = processed_action_rad
 
       substep_rows = []
       for substep in range(decimation):
@@ -282,6 +290,8 @@ def run(cfg: LogPlayTrackingConfig) -> Path:
             f"{_deg(processed_action_rad):.6f}",
             f"{joint_pos_target_rad:.8f}",
             f"{_deg(joint_pos_target_rad):.6f}",
+            f"{joint_pos_target_vel_rad_s:.8f}",
+            f"{_deg(joint_pos_target_vel_rad_s):.6f}",
             f"{pre['actuator_force_nm']:.8f}",
             f"{post['actuator_force_nm']:.8f}",
             f"{pre['qfrc_actuator_nm']:.8f}",
@@ -328,10 +338,10 @@ def run(cfg: LogPlayTrackingConfig) -> Path:
           f"[{policy_step:04d}] t={float(last_row[0]):.3f}s "
           f"raw={raw_action:+.3f} "
           f"target={float(last_row[8]):+.2f}deg "
-          f"q={float(last_row[16]):+.2f}deg "
-          f"err={float(last_row[24]):+.2f}deg "
-          f"tau={float(last_row[12]):+.3f}Nm "
-          f"pole_lift={float(last_row[34]):.1f}deg"
+          f"q={float(last_row[18]):+.2f}deg "
+          f"err={float(last_row[26]):+.2f}deg "
+          f"tau={float(last_row[14]):+.3f}Nm "
+          f"target_vel={float(last_row[10]):+.1f}deg/s"
         )
 
       if bool(done.any()):
