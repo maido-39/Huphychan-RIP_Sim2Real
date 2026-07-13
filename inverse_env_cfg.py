@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -61,7 +62,7 @@ _CYLINDER_CHATTER_ANGLE_RANGE = math.radians(10.0)
 _CYLINDER_CHATTER_REVERSALS_PER_SEC = 3
 _CYLINDER_CHATTER_UPRIGHT_EXEMPTION = math.radians(30.0)
 _VEL_OBS_SCALE = 30.0
-_BALANCE_START_PROBABILITY = 0.4
+_BALANCE_START_PROBABILITY = 0.1
 _BALANCE_HOLD_THRESHOLD = math.radians(30.0)
 _EXACT_UPRIGHT_BONUS_THRESHOLD = math.radians(30.0)
 _UPPER_SWING_THRESHOLD = math.radians(70.0)
@@ -72,11 +73,18 @@ _POLE_ONE_WAY_ROTATION_LIMIT = 4.0 * math.pi
 _LOWER_SWING_SPEED_TARGET = math.radians(220.0)
 _NEAR_UPRIGHT_SPEED_TARGET = math.radians(80.0)
 _ACTION_DELAY_STEPS = 0
-_CYLINDER_TARGET_RATE_LIMIT = math.radians(2000.0)
+_CYLINDER_TARGET_RATE_LIMIT = math.radians(1500.0)
 _CYLINDER_TARGET_DELTA_LIMIT = _CYLINDER_TARGET_RATE_LIMIT * 0.02
-_CYLINDER_TARGET_ACCEL_LIMIT = math.radians(20000.0)
+_CYLINDER_TARGET_ACCEL_LIMIT = math.radians(15000.0)
 _CYLINDER_TARGET_DELTA_CHANGE_LIMIT = _CYLINDER_TARGET_ACCEL_LIMIT * 0.02 * 0.02
 _JOINT5_RANDOMIZATION_SCALE = (0.5, 2.0)
+_CYLINDER_START_POSITION_RANGE = (-math.pi, math.pi)
+_POLE_COM_VERTICAL_OFFSET_RANGE = (-0.003, 0.003)
+_RANDOMIZED_PLAY_ENV_VAR = "MJLAB_INVERSE_PLAY_RANDOMIZED"
+
+
+def _env_flag(name: str) -> bool:
+  return os.environ.get(name, "").lower() in {"1", "true", "yes", "on"}
 
 
 def _get_spec() -> mujoco.MjSpec:
@@ -693,7 +701,7 @@ def _make_env_cfg() -> ManagerBasedRlEnvCfg:
       params={
         "asset_cfg": _JOINTS_CFG,
         "balance_start_probability": _BALANCE_START_PROBABILITY,
-        "cylinder_position_range": (-math.pi, math.pi),
+        "cylinder_position_range": _CYLINDER_START_POSITION_RANGE,
         "cylinder_velocity_range": (-0.5, 0.5),
         "swingup_pole_position_range": (-math.pi, math.pi),
         "swingup_pole_velocity_range": (-1.0, 1.0),
@@ -702,6 +710,16 @@ def _make_env_cfg() -> ManagerBasedRlEnvCfg:
           math.pi + math.radians(20.0),
         ),
         "balance_pole_velocity_range": (-0.5, 0.5),
+      },
+    ),
+    "pole_com_vertical_randomization": EventTermCfg(
+      func=dr.body_com_offset,
+      mode="reset",
+      params={
+        "asset_cfg": _POLE_INERTIA_BODY_CFG,
+        "ranges": _POLE_COM_VERTICAL_OFFSET_RANGE,
+        "operation": "add",
+        "axes": [2],
       },
     ),
     "pole_inertia_disturbance": EventTermCfg(
@@ -877,7 +895,7 @@ def _make_env_cfg() -> ManagerBasedRlEnvCfg:
       mujoco=MujocoCfg(timestep=0.005, disableflags=("contact",)),
     ),
     decimation=4,
-    episode_length_s=4.0,
+    episode_length_s=8.0,
   )
 
 
@@ -887,19 +905,21 @@ def inverse_balance_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.scene.num_envs = 1
     cfg.episode_length_s = 1e10
     cfg.observations["actor"].enable_corruption = False
-    cfg.events["reset_curriculum"].params["balance_start_probability"] = 0.0
-    cfg.events["reset_curriculum"].params["cylinder_position_range"] = (0.0, 0.0)
-    cfg.events["reset_curriculum"].params["cylinder_velocity_range"] = (0.0, 0.0)
-    cfg.events["reset_curriculum"].params["swingup_pole_position_range"] = (0.0, 0.0)
-    cfg.events["reset_curriculum"].params["swingup_pole_velocity_range"] = (0.0, 0.0)
-    for event_name in (
-      "pole_inertia_disturbance",
-      "pole_joint_damping_randomization",
-      "pole_joint_frictionloss_randomization",
-      "pole_joint_armature_randomization",
-      "pole_tip_disturbance",
-    ):
-      cfg.events.pop(event_name, None)
+    if not _env_flag(_RANDOMIZED_PLAY_ENV_VAR):
+      cfg.events["reset_curriculum"].params["balance_start_probability"] = 0.0
+      cfg.events["reset_curriculum"].params["cylinder_position_range"] = (0.0, 0.0)
+      cfg.events["reset_curriculum"].params["cylinder_velocity_range"] = (0.0, 0.0)
+      cfg.events["reset_curriculum"].params["swingup_pole_position_range"] = (0.0, 0.0)
+      cfg.events["reset_curriculum"].params["swingup_pole_velocity_range"] = (0.0, 0.0)
+      for event_name in (
+        "pole_com_vertical_randomization",
+        "pole_inertia_disturbance",
+        "pole_joint_damping_randomization",
+        "pole_joint_frictionloss_randomization",
+        "pole_joint_armature_randomization",
+        "pole_tip_disturbance",
+      ):
+        cfg.events.pop(event_name, None)
   return cfg
 
 
