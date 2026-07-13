@@ -68,6 +68,7 @@ from mjlab.rl import MjlabOnPolicyRunner, RslRlVecEnvWrapper
 from mjlab.tasks.inverse import inverse_env_cfg as inv_cfg
 from mjlab.tasks.registry import load_env_cfg, load_rl_cfg, load_runner_cls
 
+
 TASK_ID = "Mjlab-Inverse-Balance"
 OBS_DIM = 8
 HISTORY_LENGTH = 2
@@ -75,21 +76,6 @@ POLICY_INPUT_DIM = OBS_DIM * HISTORY_LENGTH
 ACTION_SCALE_RAD = 0.5 * math.pi
 CAN_FRAME_FORMAT = "=IB3x8s"
 CAN_FRAME_SIZE = struct.calcsize(CAN_FRAME_FORMAT)
-
-# inverse_env_cfg.py의 observations["actor"] 항목 순서(cylinder_angle,
-# cylinder_angle_periodic, pole_angle, joint_vel, last_action)와 각 항목의
-# 차원에 맞춘 슬라이스. mjlab의 ObservationManager는 history_length를 8차원
-# 전체가 아니라 "항목별로" 적용한 뒤(각 항목마다 [t-1, t] 스택) 그 항목들을
-# 이어붙이므로, 여기서도 항목 단위로 [t-1, t]를 묶어야 한다 (단순히
-# [obs(t-1) 8개 전체, obs(t) 8개 전체]로 이어붙이면 학습 때와 순서가 달라져
-# 신경망이 엉뚱한 값을 받게 된다).
-_OBS_TERM_SLICES = (
-  slice(0, 1),  # cylinder_angle
-  slice(1, 3),  # cylinder_angle_periodic (cos, sin)
-  slice(3, 5),  # pole_angle (cos, sin)
-  slice(5, 7),  # joint_vel (cylinder_vel, pole_vel)
-  slice(7, 8),  # last_action
-)
 
 
 @dataclass(frozen=True)
@@ -138,27 +124,6 @@ class CanFrame:
   data: bytes
 
 
-def _match_actor_std_type(agent_cfg, checkpoint_file: str, device: str) -> None:
-  """체크포인트가 실제로 학습될 때 쓰인 std_type(scalar/log)을 감지해
-  agent_cfg.actor.distribution_cfg에 반영한다.
-
-  학습 시점의 CLI 오버라이드에 따라 std_type이 현재 inverse_env_cfg.py의
-  기본값과 달라질 수 있는데, rsl_rl은 std_type에 따라 파라미터 이름을
-  distribution.std_param / distribution.log_std_param으로 다르게 저장하므로,
-  둘이 어긋나면 state_dict 로딩이 실패한다.
-  """
-  state = torch.load(checkpoint_file, map_location=device, weights_only=False)
-  actor_keys = state["actor_state_dict"].keys()
-  if "distribution.log_std_param" in actor_keys:
-    std_type = "log"
-  elif "distribution.std_param" in actor_keys:
-    std_type = "scalar"
-  else:
-    return
-  if agent_cfg.actor.distribution_cfg is not None:
-    agent_cfg.actor.distribution_cfg["std_type"] = std_type
-
-
 class RunMode(str, Enum):
   EXAMPLE = "example"
   CAN_LOOP = "can-loop"
@@ -201,7 +166,6 @@ class InverseRealPolicy:
     wrapped_env = RslRlVecEnvWrapper(env)
 
     agent_cfg = load_rl_cfg(TASK_ID)
-    _match_actor_std_type(agent_cfg, cfg.checkpoint_file, cfg.device)
     runner_cls = load_runner_cls(TASK_ID) or MjlabOnPolicyRunner
     runner = runner_cls(wrapped_env, asdict(agent_cfg), device=cfg.device)
     runner.load(
@@ -258,22 +222,19 @@ class InverseRealPolicy:
     return obs
 
   def build_policy_input(self, meas: RealMeasurement) -> torch.Tensor:
-    """observation_manager.py와 동일하게, 항목별로 [t-1, t]를 묶은 뒤
-    그 항목들을 이어붙여 16차원 입력을 만든다 (_OBS_TERM_SLICES 참고)."""
+    """history_length=2 규칙에 맞춰 [previous_obs, current_obs]를 만든다."""
     obs = self.build_single_observation(meas)
 
     if not self._history:
-      # 첫 스텝은 이전값이 없으므로 동일한 obs로 history를 채운다
-      # (mjlab의 CircularBuffer도 첫 append 시 전체를 backfill한다).
+      # 첫 스텝은 이전값이 없으므로 동일한 obs로 history를 채운다.
       self._history.append(obs.clone())
       self._history.append(obs.clone())
     else:
       self._history.append(obs.clone())
+      while len(self._history) < HISTORY_LENGTH:
+        self._history.appendleft(obs.clone())
 
-    obs_prev, obs_cur = self._history[0], self._history[1]
-    stacked = torch.cat(
-      [torch.cat([obs_prev[s], obs_cur[s]]) for s in _OBS_TERM_SLICES]
-    )
+    stacked = torch.cat(list(self._history), dim=0)
     return stacked.unsqueeze(0)  # (1, 16)
 
   def infer(self, meas: RealMeasurement) -> dict[str, float]:
@@ -281,7 +242,7 @@ class InverseRealPolicy:
     policy_input = self.build_policy_input(meas)
 
     with torch.no_grad():
-      action_tensor = self._policy({"actor": policy_input})
+      action_tensor = self._policy(policy_input)
 
     action = float(action_tensor.squeeze().item())
     action = max(-1.0, min(1.0, action))

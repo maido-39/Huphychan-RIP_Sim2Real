@@ -1,58 +1,38 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-"""Run the trained inverse policy on the real motor.
+"""`run_policy_motor.py` + 정책 출력(목표각)에 저역통과 필터를 적용한 버전.
 
-이 파일은 `commission_motor.py`의 MIT 모터 제어 기능과
-`real_policy_inference.py`의 policy 추론 기능을 이어서,
-실제 제어 루프를 구성하는 실행 스크립트입니다.
+배경
+- 정책이 매 스텝 목표각을 크게 요동시켜(예: +18 -> -18 -> +18 ...) 모터 제어가
+  너무 급격해지는 문제가 있었다. 이를 완화하기 위해 모터로 보내기 직전에
+  1차 저역통과(EMA, exponential moving average) 필터를 하나 추가한다:
 
-중요:
-- 이 파일은 `robot_state_reader.py`를 그대로 사용한다.
-- 즉, 상태 읽기 샘플은 수정하지 않고, 여기서 가져다 쓰는 방식이다.
-- 액추에이터 제어는 이 파일이 담당하고, 상태 읽기는 RobotStateReader가 담당한다.
+    filtered[n] = alpha * raw[n] + (1 - alpha) * filtered[n-1]
 
-로깅/플롯 (sin_position_test.py와 동일한 방식)
-- 200Hz 루프 안에서는 CSV 로깅만 하고, 터미널 출력은 요약만 표시한다
-  (실시간 그래프는 루프 타이밍을 해치므로 넣지 않음).
-- 종료 시(정상 종료/Ctrl+C/에러 모두) CSV를 읽어 PNG 그래프를 저장한다.
-- 제어 목표각(target)과 실측각(current)만 시간에 대해 보기 쉽게 정리한
-  텍스트 파일(.txt)도 별도로 생성한다.
+  alpha=1.0이면 필터 없음(기존과 동일), alpha가 작을수록 더 부드러워지는 대신
+  목표값을 따라가는 속도(위상)가 느려진다. 필터는 "명령을 건너뛰는" 것이 아니라
+  매 스텝 계산하되 진폭(특히 고주파 성분)만 줄이는 방식이다.
 
-사용 순서
-1. `commission_motor.py`로 모터가 MIT 모드이며 원하는 ID인지 먼저 확인한다.
-2. `robot_state_reader.py` 단독 실행으로
-   - motor_angle_deg
-   - motor_velocity_deg_s
-   - pendulum_angle_deg
-   가 정상적으로 들어오는지 먼저 확인한다.
-3. 그 다음 이 파일을 실행한다.
+- 이 필터는 추론 이후에 붙이는 것이라, 학습 때 정책이 보지 못한 지연을
+  추가하는 것이다. 즉 sim2real 성능이 학습 때와 달라질 수 있다는 점을 감안하고
+  alpha를 튜닝해야 한다 (1.0에 가깝게 시작해서 점차 낮춰보는 것을 권장).
 
-권장 첫 실행 방법
-- 처음에는 반드시 약한 배율로 시작한다.
-- `action_scale_multiplier=0.1 ~ 0.3` 정도로 시작해서
-  실제 장비가 어느 정도로 움직이는지 본 뒤 점차 올린다.
-- 처음부터 1.0으로 주면 학습 정책이 생각보다 크게 움직일 수 있다.
+- `run_policy_motor.py`는 그대로 두고, 이 파일에서만 필터링 로직을 추가했다.
+  나머지 제어 루프/로깅 구조는 동일하다.
 
-정책 추론 주기(policy_hz)
-- `inverse_env_cfg_new.py`로 학습한 정책은 시뮬레이션에서 `decimation=4`로
-  학습되었다. 즉 정책은 매 물리 스텝(200Hz)마다가 아니라 4스텝에 한 번(50Hz)만
-  새 액션을 내고, 그 사이에는 이전 목표각이 그대로 유지된 채 물리 스텝만 진행됐다.
-- 이 리듬을 실물에서도 맞추기 위해, 모터로 명령은 여전히 `control_hz`(기본 200Hz)로
-  매 루프마다 보내되(저수준 PD 트래킹/CAN 통신은 그대로 촘촘하게 유지), 정책
-  추론(policy.infer)만 `policy_hz`(기본 50Hz)에 맞춰 몇 루프에 한 번씩 호출하고,
-  그 사이 루프에서는 직전에 계산된 목표각을 그대로 재전송한다.
-- `--policy-hz`를 `--control-hz`와 같은 값으로 주면 예전 방식(매 루프 새 액션)으로
-  되돌아간다 (`decimation=1`로 학습한 예전 체크포인트를 쓸 때 사용).
+CSV에는 필터 적용 전(raw)과 후(sent, 실제 모터로 나간 값)를 모두 기록해서
+필터 효과를 눈으로 비교할 수 있게 했다.
 
 예시 실행
 ```bash
-uv run python src/mjlab/tasks/inverse/run_policy_motor.py \
+uv run python src/mjlab/tasks/inverse/run_policy_motor_filtered.py \
   --checkpoint-file logs/rsl_rl/inverse_balance/2026-07-08_12-13-31/model_950.pt \
   --motor-id 8 \
   --channel can0 \
   --encoder-port /dev/ttyACM0 \
-  --action-scale-multiplier 0.2
+  --action-scale-multiplier 0.2 \
+  --action-lpf-alpha 0.3
 ```
 """
 
@@ -60,7 +40,6 @@ import csv
 import math
 import os
 import time
-from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -76,6 +55,7 @@ from mjlab.tasks.inverse.commission_motor import (
   can,
   disable_mit,
   enable_mit,
+  parse_mit_reply_position,
   set_zero_mit,
 )
 from mjlab.tasks.inverse.real_policy_inference import (
@@ -87,7 +67,7 @@ from mjlab.tasks.inverse.robot_state_reader import RobotStateReader
 
 
 @dataclass(frozen=True)
-class RunPolicyMotorConfig:
+class RunPolicyMotorFilteredConfig:
   checkpoint_file: str
   motor_id: int
   interface: str = "socketcan"
@@ -102,24 +82,17 @@ class RunPolicyMotorConfig:
   pole_zero_deg: float = 0.0
 
   # 제어 루프 설정
-  control_hz: float = 200.0
+  control_hz: float = 50.0
   state_read_hz: float = 200.0
-  kp: float = 10.0  # K_P 값
-  kd: float = 0.45  # K_D 값
+  kp: float = 8.0  # K_P 값
+  kd: float = 1.5  # K_D 값
   velocity_limit_deg_s: float = 0.0
   torque_limit_nm: float = 0.0
   encoder_baud: int = 115200
   action_scale_multiplier: float = 0.2
 
-  # 정책 추론 주기: control_hz보다 낮게 주면, 그 사이 루프에서는 policy를 다시
-  # 부르지 않고 직전 목표각을 그대로 유지한다 (inverse_env_cfg_new.py의
-  # decimation=4, 즉 200Hz/4=50Hz와 맞추기 위한 기본값).
-  policy_hz: float = 50.0
-
-  # 명령 지연(초): 시뮬레이션(inverse_env_cfg_new.py의 delay_min_lag=delay_max_lag=4
-  # 물리스텝, timestep=0.005s이면 20ms)에는 있지만 실물은 거의 없는 지연을 인위적으로
-  # 흉내내기 위한 값. 0.0이면 지연 없음(기존과 동일). 필요한 만큼 올려서 튜닝한다.
-  command_delay_s: float = 0.0
+  # 목표각 저역통과 필터: 1.0=필터 없음, 작을수록 더 부드럽고 더 느리게 반응
+  action_lpf_alpha: float = 1.0
 
   # 안전 설정
   max_runtime_s: float = 30.0
@@ -175,7 +148,7 @@ def _send_mit_position_and_get_reply(
   return reply
 
 
-def _make_policy(cfg: RunPolicyMotorConfig) -> InverseRealPolicy:
+def _make_policy(cfg: RunPolicyMotorFilteredConfig) -> InverseRealPolicy:
   policy_cfg = RealInferenceConfig(
     checkpoint_file=cfg.checkpoint_file,
     device=cfg.device,
@@ -206,14 +179,13 @@ def _wait_for_initial_state(reader: RobotStateReader, timeout_s: float = 3.0) ->
 
 _CSV_HEADER = [
   "time_s",
-  "target_angle_deg",
+  "target_angle_deg_raw",
+  "target_angle_deg_sent",
   "motor_angle_deg",
   "motor_vel_deg_s",
-  "motor_torque_nm",
   "pole_angle_deg",
   "pole_vel_deg_s",
   "policy_action",
-  "policy_updated",
 ]
 
 
@@ -230,21 +202,19 @@ def _plot_log(csv_path: str) -> None:
     )
     return
 
-  t_list, target_list, motor_list, motor_vel_list = [], [], [], []
-  torque_list: list[float] = []
-  pole_list, pole_vel_list, action_list, updated_list = [], [], [], []
+  t_list, raw_list, sent_list, motor_list, motor_vel_list = [], [], [], [], []
+  pole_list, pole_vel_list, action_list = [], [], []
   with open(csv_path, "r", newline="") as f:
     reader = csv.DictReader(f)
     for row in reader:
       t_list.append(float(row["time_s"]))
-      target_list.append(float(row["target_angle_deg"]))
+      raw_list.append(float(row["target_angle_deg_raw"]))
+      sent_list.append(float(row["target_angle_deg_sent"]))
       motor_list.append(float(row["motor_angle_deg"]))
       motor_vel_list.append(float(row["motor_vel_deg_s"]))
-      torque_list.append(float(row["motor_torque_nm"]))
       pole_list.append(float(row["pole_angle_deg"]))
       pole_vel_list.append(float(row["pole_vel_deg_s"]))
       action_list.append(float(row["policy_action"]))
-      updated_list.append(int(row["policy_updated"]))
 
   if not t_list:
     print("로그가 비어 있어 그래프를 건너뜁니다.")
@@ -255,15 +225,13 @@ def _plot_log(csv_path: str) -> None:
   motor_list_unwrapped = np.degrees(np.unwrap(np.radians(motor_list)))
   pole_list_unwrapped = np.degrees(np.unwrap(np.radians(pole_list)))
 
-  fig, axes = plt.subplots(5, 1, figsize=(10, 12), sharex=True)
+  fig, axes = plt.subplots(4, 1, figsize=(10, 10), sharex=True)
 
-  axes[0].plot(t_list, target_list, label="target_angle_deg", linestyle="--")
+  axes[0].plot(t_list, raw_list, label="target_angle_deg_raw", linestyle=":", alpha=0.6)
+  axes[0].plot(
+    t_list, sent_list, label="target_angle_deg_sent(filtered)", linestyle="--"
+  )
   axes[0].plot(t_list, motor_list_unwrapped, label="motor_angle_deg")
-  update_t = [t for t, u in zip(t_list, updated_list, strict=True) if u]
-  update_target = [v for v, u in zip(target_list, updated_list, strict=True) if u]
-  #axes[0].scatter(
-  #  update_t, update_target, s=10, color="black", zorder=3, label="policy_updated"
-  #)
   axes[0].set_ylabel("motor angle (deg)")
   axes[0].legend()
   axes[0].grid(True)
@@ -278,14 +246,10 @@ def _plot_log(csv_path: str) -> None:
   axes[2].legend()
   axes[2].grid(True)
 
-  axes[3].plot(t_list, torque_list, color="tab:brown")
-  axes[3].set_ylabel("motor_torque (Nm)")
+  axes[3].plot(t_list, action_list, color="tab:red")
+  axes[3].set_ylabel("policy_action")
+  axes[3].set_xlabel("time (s)")
   axes[3].grid(True)
-
-  axes[4].plot(t_list, action_list, color="tab:red")
-  axes[4].set_ylabel("policy_action")
-  axes[4].set_xlabel("time (s)")
-  axes[4].grid(True)
 
   fig.tight_layout()
   png_path = os.path.splitext(csv_path)[0] + ".png"
@@ -293,7 +257,10 @@ def _plot_log(csv_path: str) -> None:
   print(f"그래프 저장 완료: {png_path}")
 
 
-def run(cfg: RunPolicyMotorConfig) -> None:
+def run(cfg: RunPolicyMotorFilteredConfig) -> None:
+  if not (0.0 < cfg.action_lpf_alpha <= 1.0):
+    raise ValueError(f"action_lpf_alpha must be in (0, 1], got {cfg.action_lpf_alpha}")
+
   policy = _make_policy(cfg)
   bus = _open_bus(cfg.interface, cfg.channel)
   reader = RobotStateReader(
@@ -306,11 +273,13 @@ def run(cfg: RunPolicyMotorConfig) -> None:
     encoder_baud=cfg.encoder_baud,
   )
 
-  # 로그 파일 준비 (sin_position_test.py와 동일한 방식: CSV + 종료 후 PNG plot)
+  # 로그 파일 준비 (run_policy_motor.py와 동일한 방식: CSV + 종료 후 PNG plot)
   os.makedirs(cfg.log_dir, exist_ok=True)
   ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-  csv_path = os.path.join(cfg.log_dir, f"policy_run_{ts}.csv")
-  txt_path = os.path.join(cfg.log_dir, f"policy_run_{ts}_target_vs_current.txt")
+  csv_path = os.path.join(cfg.log_dir, f"policy_run_filtered_{ts}.csv")
+  txt_path = os.path.join(
+    cfg.log_dir, f"policy_run_filtered_{ts}_target_vs_current.txt"
+  )
 
   csv_file = open(csv_path, "w", newline="")
   csv_writer = csv.writer(csv_file)
@@ -318,10 +287,13 @@ def run(cfg: RunPolicyMotorConfig) -> None:
 
   txt_file = open(txt_path, "w")
   txt_file.write(
-    "{:>10}  {:>16}  {:>18}\n".format("time_s", "target_angle_deg", "current_angle_deg")
+    "{:>10}  {:>16}  {:>18}  {:>18}\n".format(
+      "time_s", "target_raw_deg", "target_sent_deg", "current_angle_deg"
+    )
   )
 
   print(f"Opening motor control on {cfg.channel}, motor_id={cfg.motor_id}")
+  print(f"action_lpf_alpha={cfg.action_lpf_alpha} (1.0=필터 없음)")
   print(f"CSV 로그: {csv_path}")
   print(f"목표/현재각 텍스트 로그: {txt_path}")
 
@@ -346,28 +318,8 @@ def run(cfg: RunPolicyMotorConfig) -> None:
 
     _wait_for_initial_state(reader)  # <- enable 이후로 옮김
 
-    policy_decimation = max(1, round(float(cfg.control_hz) / float(cfg.policy_hz)))
-    print(
-      f"control_hz={cfg.control_hz:.1f}  policy_hz={cfg.policy_hz:.1f}  "
-      f"-> policy는 {policy_decimation}루프마다 한 번만 갱신, 그 사이엔 목표각 유지"
-    )
-
-    # 명령 지연 버퍼: 매 루프 최신 desired_angle_deg를 넣고, command_delay_steps
-    # 루프 전에 넣었던(가장 오래된) 값을 꺼내 실제로 모터에 보낸다.
-    command_delay_steps = max(
-      0, round(float(cfg.command_delay_s) * float(cfg.control_hz))
-    )
-    command_delay_buffer: deque[float] = deque(
-      [0.0] * (command_delay_steps + 1), maxlen=command_delay_steps + 1
-    )
-    print(
-      f"command_delay_s={cfg.command_delay_s:.4f} -> "
-      f"{command_delay_steps}루프({command_delay_steps / cfg.control_hz * 1000:.1f}ms) 명령 지연"
-    )
-
-    desired_angle_deg = 0.0
-    last_policy_action = 0.0
-    sample_idx = 0
+    raw_target_deg = 0.0
+    filtered_target_deg = 0.0
     prev_time = time.monotonic()
     period_s = 1.0 / float(cfg.control_hz)
     deadline = prev_time + float(cfg.max_runtime_s)
@@ -376,10 +328,9 @@ def run(cfg: RunPolicyMotorConfig) -> None:
     while time.monotonic() < deadline:
       loop_start = time.monotonic()
 
-      # 최신 목표각을 지연 버퍼에 넣고, command_delay_steps 루프 전에 넣었던
-      # (가장 오래된) 값을 꺼내 이번에 실제로 모터에 전송한다.
-      command_delay_buffer.append(desired_angle_deg)
-      sent_target_deg = command_delay_buffer[0]
+      # 이번 사이클에 실제로 모터에 전송하는 목표각(필터 적용 후)
+      sent_target_deg = filtered_target_deg
+      logged_raw_target_deg = raw_target_deg
 
       reply = _send_mit_position_and_get_reply(
         bus,
@@ -394,20 +345,16 @@ def run(cfg: RunPolicyMotorConfig) -> None:
       if reply is None:
         raise RuntimeError("No MIT reply received from motor")
 
+      _ = parse_mit_reply_position(reply)
       state = reader.get_state()
       now = time.monotonic()
       prev_time = now
 
       cylinder_angle_deg = state.motor_angle_deg
       cylinder_vel_deg_s = state.motor_velocity_deg_s
-      cylinder_torque_nm = state.motor_torque_nm
       pole_angle_deg = state.pendulum_angle_deg
 
-      if (
-        cylinder_angle_deg is None
-        or cylinder_vel_deg_s is None
-        or cylinder_torque_nm is None
-      ):
+      if cylinder_angle_deg is None or cylinder_vel_deg_s is None:
         raise RuntimeError("Motor state is not available from RobotStateReader")
       if pole_angle_deg is None:
         raise RuntimeError(
@@ -434,51 +381,43 @@ def run(cfg: RunPolicyMotorConfig) -> None:
         pole_vel_deg_s=pole_vel_deg_s,
         torque_nm=None,
       )
-
-      policy_updated = sample_idx % policy_decimation == 0
-      if policy_updated:
-        result = policy.infer(meas)
-        desired_angle_deg = result["target_angle_deg"] * float(
-          cfg.action_scale_multiplier
-        )
-        last_policy_action = result["policy_action"]
-      # else: policy를 다시 부르지 않고, 직전 desired_angle_deg/last_policy_action을
-      # 그대로 유지한다 (학습 시 decimation과 맞추기 위함).
+      result = policy.infer(meas)
+      raw_target_deg = result["target_angle_deg"] * float(cfg.action_scale_multiplier)
+      filtered_target_deg = (
+        cfg.action_lpf_alpha * raw_target_deg
+        + (1.0 - cfg.action_lpf_alpha) * filtered_target_deg
+      )
 
       elapsed_t = now - start_t
       csv_writer.writerow(
         [
           f"{elapsed_t:.4f}",
+          f"{logged_raw_target_deg:.3f}",
           f"{sent_target_deg:.3f}",
           f"{cylinder_angle_deg:.3f}",
           f"{cylinder_vel_deg_s:.3f}",
-          f"{cylinder_torque_nm:.3f}",
           f"{pole_angle_deg:.3f}",
           f"{pole_vel_deg_s:.3f}",
-          f"{last_policy_action:.6f}",
-          f"{int(policy_updated)}",
+          f"{result['policy_action']:.6f}",
         ]
       )
       txt_file.write(
-        "{:10.4f}  {:16.3f}  {:18.3f}\n".format(
-          elapsed_t, sent_target_deg, cylinder_angle_deg
+        "{:10.4f}  {:16.3f}  {:18.3f}  {:18.3f}\n".format(
+          elapsed_t, logged_raw_target_deg, sent_target_deg, cylinder_angle_deg
         )
       )
 
       print(
-        "motor={:+8.3f} deg  pole={:+8.3f} deg  torque={:+6.3f} Nm  "
-        "cmd={:+8.3f} deg  act={:+6.3f}  scale={:.2f}  upd={}".format(
+        "motor={:+8.3f} deg  pole={:+8.3f} deg  "
+        "raw={:+8.3f} deg  sent={:+8.3f} deg  act={:+6.3f}".format(
           cylinder_angle_deg,
           pole_angle_deg,
-          cylinder_torque_nm,
-          desired_angle_deg,
-          last_policy_action,
-          cfg.action_scale_multiplier,
-          "Y" if policy_updated else ".",
+          logged_raw_target_deg,
+          sent_target_deg,
+          result["policy_action"],
         )
       )
 
-      sample_idx += 1
       elapsed = time.monotonic() - loop_start
       sleep_s = period_s - elapsed
       if sleep_s > 0.0:
@@ -507,7 +446,7 @@ def run(cfg: RunPolicyMotorConfig) -> None:
 
 
 def main() -> None:
-  cfg = tyro.cli(RunPolicyMotorConfig)
+  cfg = tyro.cli(RunPolicyMotorFilteredConfig)
   run(cfg)
 
 
