@@ -12,11 +12,14 @@
 | ---------------------- | ------------------------- |
 | Physics step           | `0.005 s` / `200 Hz`      |
 | Policy update          | `decimation=4` / `50 Hz`  |
-| Command delay          | `20 ms`                   |
+| Command delay          | `0 ms`                    |
 | Real policy loop       | `50 Hz`                   |
 | Real state read        | `200 Hz`                  |
-| Action scale           | `0.5*pi rad`              |
-| Real action multiplier | `0.2`                     |
+| Action scale           | `20 deg`                  |
+| Target rate limit      | `1500 deg/s`              |
+| Target accel limit     | `15000 deg/s^2`           |
+| Real action multiplier | default `0.2`, test `1.0` |
+| Pole COM randomization | `z +/- 3 mm`              |
 
 ## Highest Priority To Match
 
@@ -36,18 +39,26 @@
 | Physics frequency     | `200 Hz`                  | N/A                             | N/A                   |
 | Policy decimation     | `4`                       | N/A                             | N/A                   |
 | Policy frequency      | `50 Hz`                   | `50 Hz target, measured ___ Hz` | N/A                   |
-| Command delay         | `4 physics steps = 20 ms` | `___ ms`                        | CAN/motor dependent   |
+| Command delay         | `0 physics steps = 0 ms`  | `___ ms`                        | CAN/motor dependent   |
 | Real control loop     | `50 Hz`                   | `___ Hz`                        | N/A                   |
 | Real state read loop  | `200 Hz`                  | `___ Hz`                        | encoder/CAN dependent |
 
 ## Action And Command
 
-## Action And Command
-정책은 MuJoCo actuator kp=2.2, kv=0.6의 응답을 기준으로 학습되었기 때문에, 첫 실기기 배포에서는 Real MIT kp/kd를 조절하여 실기기 모터 응답을 학습 당시 시뮬레이션 응답에 최대한 맞춘다. 만약 실기기가 해당 응답을 안전하게 재현할 수 없다면, 시뮬레이션 actuator 모델을 실기기 응답에 맞게 수정한 뒤 재학습 또는 파인튜닝한다.
-| Parameter                | RL/Sim                      | Measured                                                         | Manufacturer |
-|---                       |---                          |---                                                               |---           |
-| Real motor tracking gain | MIT `kp=16.5`, `kd=1.0`      | real motor response reference; measure step/sine response        | N/A          |
-| Sim motor tracking gain  | actuator `kp=16.5`, `kd=1.0` | tune to match real rise time, overshoot, settling, and phase lag | N/A          |
+정책은 MuJoCo position actuator와 action target limiter를 통과한 응답을 기준으로 학습된다.
+실기기 배포에서는 Real MIT `kp/kd`와 target 변환 코드가 학습 당시 시뮬레이션 응답을 재현해야 한다.
+실기기가 이 응답을 안전하게 재현할 수 없으면, 시뮬레이션 actuator 모델을 실기기 응답에 맞게 수정한 뒤 재학습 또는 파인튜닝한다.
+
+| Parameter                | RL/Sim                                  | Measured                                                         | Manufacturer |
+|---                       |---                                      |---                                                               |---           |
+| Policy action range      | `[-1, 1]`                               | N/A                                                              | N/A          |
+| Action scale             | `20 deg`                                | same in real policy inference                                    | N/A          |
+| Target rate limit        | `1500 deg/s`                            | same in real policy inference                                    | N/A          |
+| Target accel limit       | `15000 deg/s^2`                         | same in real policy inference                                    | N/A          |
+| Real action multiplier   | default `0.2`, commonly tested as `1.0` | set by `run_policy_motor.py --action-scale-multiplier`           | N/A          |
+| Real motor tracking gain | MIT `kp=16.5`, `kd=1.0`                 | real motor response reference; measure step/sine response        | N/A          |
+| Sim motor tracking gain  | actuator `kp=10.0`, `kv=0.45`           | tune to match real rise time, overshoot, settling, and phase lag | N/A          |
+| Sim motor force range    | `[-10, 10] Nm`                          | compare with observed real torque/current limit                  | motor dependent |
 
 
 ## Actuated Axis: Revolute 3
@@ -77,12 +88,16 @@ Joint armature
 | Parameter                  | RL/Sim                                                    | Measured                | Manufacturer |
 | -------------------------- | --------------------------------------------------------- | --------                | ------------ |
 | Joint axis                 | `(-1, 0, 0)`                                              | matched                 |    N/A       |
-| Joint damping              | `0.0002`                                                  |                         |              |
-| Joint frictionloss         | `0.0001`                                                  |                         |              |
+| Joint damping              | `0.0001`                                                  |                         |              |
+| Joint frictionloss         | `0.00007`                                                 |                         |              |
 | Joint armature             | `0.00001`                                                 |                         |              |
 | Pole assembly mass         | `0.0318688 kg`                                            | matched                 |    N/A       |
-| Pole COM                   | `(0.004277, -2.21893e-08, -0.0405385)`                    | CAD-based, semi-matched |    N/A       |
-| Pole diagonal inertia      | `(4.75513e-05, 4.74611e-05, 3.25502e-07)`                 | CAD-based, semi-matched |    N/A       |
+| Pole COM                   | `(0.004277, -2.21893e-08, -0.037)`                        | CAD/PD-tuned, semi-matched | N/A       |
+| Pole COM z randomization   | `+/- 0.003 m`                                             | range to validate       |    N/A       |
+| Pole diagonal inertia      | `(4.61015e-05, 4.60103e-05, 3.26571e-07)`                 | CAD/PD-tuned, semi-matched | N/A       |
+| Damping randomization      | `0.5x ~ 2.0x`                                             | training reset randomization | N/A       |
+| Frictionloss randomization | `0.5x ~ 2.0x`                                             | training reset randomization | N/A       |
+| Armature randomization     | `0.5x ~ 2.0x`                                             | training reset randomization | N/A       |
 
 ## Policy Observation Contract
 
@@ -110,6 +125,7 @@ Joint armature
 | Hold reward ramp time        | `0.8 s`                   |
 | Upper swing region           | `110 deg ~ 250 deg`       |
 | Swing speed normalization    | `220 deg/s`               |
+| Balance-start probability    | `0.1`                     |
 
 ## Code Pointers
 
@@ -119,6 +135,7 @@ Joint armature
 | MuJoCo body/joint/actuator parameters | `src/mjlab/tasks/inverse/assets/inverse.xml`        |
 | Real motor policy runner              | `src/mjlab/tasks/inverse/run_policy_motor.py`       |
 | Real policy observation construction  | `src/mjlab/tasks/inverse/real_policy_inference.py`  |
+| Modified real policy inference copy   | `src/mjlab/tasks/inverse/real_policy_inference_modified.py` |
 
 ## Notes
 
