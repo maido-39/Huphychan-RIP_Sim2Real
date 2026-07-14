@@ -34,7 +34,7 @@
     <geom type="mesh" material="robot_white" mesh="Robstride_S02_1"/>
     <body name="Rotor_1" pos="0 0 0.004">
       <inertial pos="-0.000641237 0.020861 0.0151062" quat="0.140212 0.634222 -0.437725 0.621692" mass="0.053175" diaginertia="4.07858e-05 3.80533e-05 8.48022e-06"/>
-      <joint name="Revolute 3" pos="0 0 0" axis="0 0 -1" damping="0.05" armature="0.0142"/>
+      <joint name="Revolute 3" pos="0 0 0" axis="0 0 -1" damping="0.0076" armature="0.0064" frictionloss="0.0524"/>
       <geom pos="0 0 -0.004" type="mesh" contype="0" conaffinity="0" group="1" density="0" material="robot_white" mesh="Rotor_1"/>
       <geom pos="0 0 -0.004" type="mesh" material="robot_white" mesh="Rotor_1"/>
       <geom pos="0 0 -0.004" type="mesh" contype="0" conaffinity="0" group="1" density="0" material="robot_white" mesh="EN25-ABZ-256_1"/>
