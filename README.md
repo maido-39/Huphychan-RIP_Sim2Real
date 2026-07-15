@@ -32,6 +32,15 @@
   - CAN 통신 루프에 연결 가능한 구조 제공
 - 즉, 시뮬레이터에서 학습한 정책을 실물 하드웨어 쪽으로 넘기는 어댑터 역할을 합니다.
 
+### `REAL_MOTOR_README.md`
+- 실물 모터 실행 절차를 따로 정리한 문서입니다.
+- 내용:
+  - CANable을 `can0`로 여는 방법
+  - 모터 스캔 / 커미셔닝
+  - 모터 상태 모니터링
+  - 엔코더 + 모터 상태 읽기
+  - 학습된 체크포인트를 실물 모터에서 재생하는 방법
+
 ## 보조 폴더
 
 ### `assets/`
@@ -52,3 +61,114 @@
 3. `inverse_env_cfg.py`에서 학습 설정 조정
 4. 학습 후 성공한 `.pt`를 `successful_checkpoints/`에 정리
 5. `real_policy_inference.py`로 실물 적용 파이프라인 연결
+
+## 자주 쓰는 실행 명령어
+
+아래 명령은 모두 프로젝트 루트에서 실행합니다.
+
+```bash
+cd /home/aril/mjlab
+```
+
+### 1. 학습 시작
+
+`inverse_env_cfg.py` 기준으로 처음부터 학습을 시작합니다.
+
+```bash
+uv run train Mjlab-Inverse-Balance
+```
+
+iteration 수를 같이 지정하려면:
+
+```bash
+uv run train Mjlab-Inverse-Balance \
+  --agent.max-iterations 50000
+```
+
+이어서 학습하려면:
+
+```bash
+uv run train Mjlab-Inverse-Balance \
+  --agent.resume True \
+  --agent.load-run <run_name> \
+  --agent.load-checkpoint <model_xxx.pt> \
+  --agent.max-iterations 50000
+```
+
+예시:
+
+```bash
+uv run train Mjlab-Inverse-Balance \
+  --agent.resume True \
+  --agent.load-run 2026-07-15_14-39-22 \
+  --agent.load-checkpoint model_900.pt \
+  --agent.max-iterations 50000
+```
+
+### 2. 웹 모니터링 페이지 열기
+
+학습 로그를 TensorBoard 웹 페이지로 모니터링합니다.
+
+```bash
+uv run tensorboard --logdir logs/rsl_rl --port 6006
+```
+
+브라우저에서 아래 주소를 엽니다.
+
+```text
+http://localhost:6006
+```
+
+### 3. 체크포인트 재생
+
+학습된 체크포인트를 시뮬레이터에서 재생합니다.
+
+```bash
+uv run play Mjlab-Inverse-Balance \
+  --checkpoint-file logs/rsl_rl/inverse_balance/<run_name>/model_<step>.pt
+```
+
+예시:
+
+```bash
+uv run play Mjlab-Inverse-Balance \
+  --checkpoint-file logs/rsl_rl/inverse_balance/2026-07-15_14-39-22/model_900.pt
+```
+
+play에서 랜덤화된 reset 조건까지 보고 싶으면:
+
+```bash
+MJLAB_INVERSE_PLAY_RANDOMIZED=1 uv run play Mjlab-Inverse-Balance \
+  --checkpoint-file logs/rsl_rl/inverse_balance/2026-07-15_14-39-22/model_900.pt
+```
+
+### 4. 체크포인트 재생 로그 + 그래프 시각화
+
+체크포인트를 재생하면서 CSV 로그를 남기고, 바로 PNG 그래프까지 생성합니다.
+
+```bash
+uv run python src/mjlab/tasks/inverse/visualize_play_checkpoint.py \
+  --checkpoint-file logs/rsl_rl/inverse_balance/2026-07-15_14-39-22/model_900.pt
+```
+
+랜덤화된 play 조건으로 보고 싶으면:
+
+```bash
+MJLAB_INVERSE_PLAY_RANDOMIZED=1 uv run python src/mjlab/tasks/inverse/visualize_play_checkpoint.py \
+  --checkpoint-file logs/rsl_rl/inverse_balance/2026-07-15_17-40-42/model_700.pt
+```
+
+생성물:
+
+- CSV: `src/mjlab/tasks/inverse/play_tracking_logs/*.csv`
+- PNG: `src/mjlab/tasks/inverse/play_tracking_logs/*.png`
+
+옵션 예시:
+
+```bash
+MJLAB_INVERSE_PLAY_RANDOMIZED=1 uv run python src/mjlab/tasks/inverse/visualize_play_checkpoint.py \
+  --checkpoint-file logs/rsl_rl/inverse_balance/2026-07-15_17-40-42/model_700.pt \
+  --duration-s 8.0 \
+  --no-fixed-start \
+  --dpi 180
+```

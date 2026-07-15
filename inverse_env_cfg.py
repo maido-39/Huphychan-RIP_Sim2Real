@@ -16,7 +16,6 @@ from mjlab.entity import Entity, EntityArticulationInfoCfg, EntityCfg
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs.mdp import dr
 from mjlab.envs.mdp import (
-  apply_body_impulse,
   last_action,
   time_out,
 )
@@ -62,7 +61,7 @@ _CYLINDER_CHATTER_ANGLE_RANGE = math.radians(10.0)
 _CYLINDER_CHATTER_REVERSALS_PER_SEC = 3
 _CYLINDER_CHATTER_UPRIGHT_EXEMPTION = math.radians(30.0)
 _VEL_OBS_SCALE = 30.0
-_BALANCE_START_PROBABILITY = 0.1
+_BALANCE_START_PROBABILITY = 1.0
 _BALANCE_HOLD_THRESHOLD = math.radians(30.0)
 _EXACT_UPRIGHT_BONUS_THRESHOLD = math.radians(30.0)
 _UPPER_SWING_THRESHOLD = math.radians(70.0)
@@ -763,18 +762,6 @@ def _make_env_cfg() -> ManagerBasedRlEnvCfg:
         "operation": "scale",
       },
     ),
-    "pole_tip_disturbance": EventTermCfg(
-      func=apply_body_impulse,
-      mode="step",
-      params={
-        "asset_cfg": _POLE_BODY_CFG,
-        "force_range": (-0.15, 0.15),
-        "torque_range": (-0.002, 0.002),
-        "duration_s": (0.01, 0.03),
-        "cooldown_s": (0.20, 0.60),
-        "body_point_offset": (-0.0504, 0.0, -0.0228),
-      },
-    ),
   }
 
   rewards = {
@@ -905,19 +892,21 @@ def inverse_balance_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.scene.num_envs = 1
     cfg.episode_length_s = 1e10
     cfg.observations["actor"].enable_corruption = False
+    cfg.events["reset_curriculum"].params["balance_start_probability"] = 1.0
+    cfg.events["reset_curriculum"].params["cylinder_position_range"] = (0.0, 0.0)
+    cfg.events["reset_curriculum"].params["cylinder_velocity_range"] = (0.0, 0.0)
+    cfg.events["reset_curriculum"].params["balance_pole_position_range"] = (
+      math.pi,
+      math.pi,
+    )
+    cfg.events["reset_curriculum"].params["balance_pole_velocity_range"] = (0.0, 0.0)
     if not _env_flag(_RANDOMIZED_PLAY_ENV_VAR):
-      cfg.events["reset_curriculum"].params["balance_start_probability"] = 0.0
-      cfg.events["reset_curriculum"].params["cylinder_position_range"] = (0.0, 0.0)
-      cfg.events["reset_curriculum"].params["cylinder_velocity_range"] = (0.0, 0.0)
-      cfg.events["reset_curriculum"].params["swingup_pole_position_range"] = (0.0, 0.0)
-      cfg.events["reset_curriculum"].params["swingup_pole_velocity_range"] = (0.0, 0.0)
       for event_name in (
         "pole_com_vertical_randomization",
         "pole_inertia_disturbance",
         "pole_joint_damping_randomization",
         "pole_joint_frictionloss_randomization",
         "pole_joint_armature_randomization",
-        "pole_tip_disturbance",
       ):
         cfg.events.pop(event_name, None)
   return cfg
