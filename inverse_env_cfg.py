@@ -882,7 +882,7 @@ def _make_env_cfg() -> ManagerBasedRlEnvCfg:
       mujoco=MujocoCfg(timestep=0.005, disableflags=("contact",)),
     ),
     decimation=4,
-    episode_length_s=8.0,
+    episode_length_s=12.0,
   )
 
 

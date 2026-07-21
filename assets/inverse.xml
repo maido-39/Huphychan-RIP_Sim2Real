@@ -34,14 +34,14 @@
     <geom type="mesh" contype="0" conaffinity="0" group="1" density="0" material="robot_white" mesh="Robstride_S02_1" />
     <geom type="mesh" material="robot_white" mesh="Robstride_S02_1" />
     <body name="Rotor_1" pos="0 0 0.004">
-      <inertial pos="0.00100264 0.0189668 0.0145397" quat="0.142162 0.635341 -0.433634 0.622971" mass="0.0584857" diaginertia="4.65505e-05 4.30645e-05 9.8421e-06" />
-      <joint name="Revolute 3" pos="0 0 0" axis="0 0 -1" damping="0.000026929" armature="0.00003819" frictionloss="0.000091932" />
+      <inertial pos="-0.000641237 0.020861 0.0151062" quat="0.140212 0.634222 -0.437725 0.621692" mass="0.053175" diaginertia="4.07858e-05 3.80533e-05 8.48022e-06" />
+      <joint name="Revolute 3" pos="0 0 0" axis="0 0 -1" damping="0.007073" armature="0.0017" frictionloss="0.142747" />
       <geom pos="0 0 -0.004" type="mesh" contype="0" conaffinity="0" group="1" density="0" material="robot_white" mesh="Rotor_1" />
       <geom pos="0 0 -0.004" type="mesh" material="robot_white" mesh="Rotor_1" />
       <geom pos="0 0 -0.004" type="mesh" contype="0" conaffinity="0" group="1" density="0" material="robot_white" mesh="EN25-ABZ-256_1" />
       <geom pos="0 0 -0.004" type="mesh" material="robot_white" mesh="EN25-ABZ-256_1" />
       <body name="BoldHolder_1" pos="0.0504 0 0.0188">
-        <inertial pos="0.004277 -2.21893e-08 -0.037" quat="0.707101 -0.00282038 -0.00282038 0.707101" mass="0.0318688" diaginertia="4.61015e-05 4.60103e-05 3.26571e-07" />
+        <inertial pos="0.00370047 -6.17952e-08 -0.0309348" quat="0.707069 -0.0073221 -0.0073221 0.707069" mass="0.0301" diaginertia="4.31983e-05 4.29845e-05 5.42231e-07" />
         <joint name="Revolute 5" pos="0 0 0" axis="-1 0 0" damping="0.000015" frictionloss="0.000000" armature="0.0000042" />
         <geom pos="-0.0504 0 -0.0228" type="mesh" contype="0" conaffinity="0" group="1" density="0" material="robot_white" mesh="BoldHolder_1" />
         <geom pos="-0.0504 0 -0.0228" type="mesh" material="robot_white" mesh="BoldHolder_1" />
