@@ -13,3 +13,4 @@ wandb/
 runs/
 
 *.mjb
+sine_test_logs/
