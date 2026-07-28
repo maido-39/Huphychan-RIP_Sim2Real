@@ -166,6 +166,28 @@ class MainConfig:
   disable_command_id: int | None = None
 
 
+def _match_actor_std_type(agent_cfg, checkpoint_file: str, device: str) -> None:
+  """체크포인트가 실제로 학습될 때 쓰인 std_type(scalar/log)을 감지해
+  agent_cfg.actor.distribution_cfg에 반영한다.
+
+  학습 시점의 CLI 오버라이드나 config 변경에 따라 std_type이 현재
+  inverse_env_cfg.py의 기본값과 달라질 수 있는데, rsl_rl은 std_type에 따라
+  파라미터 이름을 distribution.std_param / distribution.log_std_param으로
+  다르게 저장하므로, 둘이 어긋나면 state_dict 로딩이 실패한다. 이 함수는
+  이전/이후 체크포인트를 모두 그대로 로드할 수 있게 해준다.
+  """
+  state = torch.load(checkpoint_file, map_location=device, weights_only=False)
+  actor_keys = state["actor_state_dict"].keys()
+  if "distribution.log_std_param" in actor_keys:
+    std_type = "log"
+  elif "distribution.std_param" in actor_keys:
+    std_type = "scalar"
+  else:
+    return
+  if agent_cfg.actor.distribution_cfg is not None:
+    agent_cfg.actor.distribution_cfg["std_type"] = std_type
+
+
 class InverseRealPolicy:
   """학습된 inverse policy를 실물 입력에 연결하기 위한 얇은 래퍼."""
 
@@ -185,6 +207,7 @@ class InverseRealPolicy:
     wrapped_env = RslRlVecEnvWrapper(env)
 
     agent_cfg = load_rl_cfg(TASK_ID)
+    _match_actor_std_type(agent_cfg, cfg.checkpoint_file, cfg.device)
     runner_cls = load_runner_cls(TASK_ID) or MjlabOnPolicyRunner
     runner = runner_cls(wrapped_env, asdict(agent_cfg), device=cfg.device)
     runner.load(
@@ -302,10 +325,10 @@ class InverseRealPolicy:
     policy_input = self.build_policy_input(meas)
 
     with torch.no_grad():
-      action_tensor = self._policy(policy_input)
+      action_tensor = self._policy({"actor": policy_input})
 
     raw_action = float(action_tensor.squeeze().item())
-    action = max(-1.0, min(1.0, raw_action))
+    action = raw_action  # [-1, 1] normalized action
     self._last_action = action
 
     scaled_target_rad = action * ACTION_SCALE_RAD
