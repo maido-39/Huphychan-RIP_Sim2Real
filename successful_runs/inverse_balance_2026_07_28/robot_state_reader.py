@@ -46,17 +46,17 @@ from typing import Optional
 
 import can
 
-from mjlab.tasks.inverse.commission_motor import (
+from .commission_motor import (
   CAN_CMD_CLEAR_FAULT,
   _flush_bus,
   _open_bus,
   _shutdown_bus,
 )
-from mjlab.tasks.inverse.encoder_reader import (
+from .encoder_reader import (
   EncoderStateReader,
   PoleVelocityEstimator,
 )
-from mjlab.tasks.inverse.monitor import decode_mit_feedback
+from .monitor import decode_mit_feedback
 
 
 def _matches_motor_state_frame(msg, motor_id: int) -> bool:

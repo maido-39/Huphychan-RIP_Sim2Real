@@ -1,23 +1,39 @@
-"""Inverse passive-pendulum step-tracking RL task with 360-degree spawn randomization.
+"""Motor-only sine-tracking RL task.
 
-The actuated motor (Revolute 3) learns to move the passive pendulum
-(Revolute 5) repeatedly through 0 -> +90 -> 0 -> -90(270) -> 0 deg.
+The passive pendulum assembly is removed from the MuJoCo model. Training and
+playback use only the RobStride rotor and Revolute 3.
 
-The task keeps the original hardware-side constraints:
+Model:
+- assets/inverse_motor_only.xml
+- one joint: Revolute 3
+- no Revolute 5, pole body, pole inertia, or pole encoder
+
+Observation per frame:
+1) cos(motor_angle)
+2) sin(motor_angle)
+3) motor_velocity / 30
+4) normalized sine target
+
+history_length=2, so the policy input is 8-dimensional.
+
+Target:
+- 90 deg * sin(2*pi*0.25*t)
+- period: 4 seconds
+
+Control:
 - MuJoCo physics: 200 Hz
-- Policy/action update: 50 Hz
-- Position action scale: 20 deg
-- Target rate limit: 1500 deg/s
-- Target acceleration limit: 15000 deg/s^2
-- Actuator gains, force range, joint damping/friction/armature: loaded from assets/inverse.xml
+- policy update: 50 Hz
+- position action scale: 20 deg
+- target rate limit: 1500 deg/s
+- target acceleration limit: 15000 deg/s^2
 
-Task-specific design:
-- One reward term only: passive-pendulum sine position/velocity tracking
-- No balance, swing-up, upright, chatter, or rotation-limit rewards/terminations
-- Only time_out remains to create PPO episode boundaries
-- Motor spawn angle randomized over 360 degrees at every reset
-- Pendulum spawn angle randomized over 360 degrees at every reset
-- Initial joint velocities reset to zero
+Reward:
+- negative squared circular motor-position tracking error
+- action-rate penalty to suppress rapid command jitter
+
+Reset:
+- motor angle uniform in [-pi, pi]
+- motor velocity zero
 """
 
 from __future__ import annotations
@@ -33,7 +49,7 @@ import torch
 from mjlab.actuator.xml_actuator import XmlActuatorCfg
 from mjlab.entity import Entity, EntityArticulationInfoCfg, EntityCfg
 from mjlab.envs import ManagerBasedRlEnvCfg
-from mjlab.envs.mdp import last_action, time_out
+from mjlab.envs.mdp import time_out
 from mjlab.envs.mdp.actions import JointPositionAction, JointPositionActionCfg
 from mjlab.managers.action_manager import ActionTermCfg
 from mjlab.managers.event_manager import EventTermCfg
@@ -61,19 +77,11 @@ if TYPE_CHECKING:
 # Model and entity configuration
 # =============================================================================
 
-_INVERSE_XML = Path(__file__).parent / "assets" / "inverse.xml"
+_MOTOR_ONLY_XML = Path(__file__).parent / "assets" / "inverse_motor_only.xml"
 
-_JOINTS_CFG = SceneEntityCfg(
-  "inverse",
-  joint_names=("Revolute 3", "Revolute 5"),
-)
-_CYLINDER_CFG = SceneEntityCfg(
+_MOTOR_CFG = SceneEntityCfg(
   "inverse",
   joint_names=("Revolute 3",),
-)
-_POLE_CFG = SceneEntityCfg(
-  "inverse",
-  joint_names=("Revolute 5",),
 )
 
 
@@ -100,18 +108,15 @@ _VEL_OBS_SCALE = 30.0
 
 
 # =============================================================================
-# Step-reference settings
+# Motor sine-reference settings
 # =============================================================================
 
-# Pendulum target:
-#   0~3 s:  +45 deg
-#   3~6 s:  -45 deg
-#   반복
-_STEP_TARGET_ANGLE_RAD = math.radians(45.0)
-_STEP_HOLD_TIME_S = 3.0
-
-_STEP_POSITION_SIGMA_RAD = math.radians(20.0)
-_STEP_VELOCITY_SIGMA_RAD_S = math.radians(120.0)
+# Motor target:
+#   target(t) = 90 deg * sin(2*pi*0.25*t)
+# One full cycle takes 4 seconds:
+#   0 s: 0 deg, 1 s: +90 deg, 2 s: 0 deg, 3 s: -90 deg
+_MOTOR_SINE_AMPLITUDE_RAD = math.radians(90.0)
+_MOTOR_SINE_FREQUENCY_HZ = 0.25
 
 _EPISODE_LENGTH_S = 12.0
 # MuJoCo entity
@@ -120,7 +125,7 @@ _EPISODE_LENGTH_S = 12.0
 
 def _get_spec() -> mujoco.MjSpec:
   """Load the same MJCF used by the existing inverse task."""
-  return mujoco.MjSpec.from_file(str(_INVERSE_XML))
+  return mujoco.MjSpec.from_file(str(_MOTOR_ONLY_XML))
 
 
 _INVERSE_ARTICULATION = EntityArticulationInfoCfg(
@@ -137,7 +142,6 @@ _INVERSE_INIT = EntityCfg.InitialStateCfg(
   pos=(0.0, 0.0, 0.0),
   joint_pos={
     "Revolute 3": 0.0,
-    "Revolute 5": 0.0,
   },
   joint_vel={".*": 0.0},
 )
@@ -231,7 +235,7 @@ class RateLimitedJointPositionAction(JointPositionAction):
 
 
 # =============================================================================
-# Step reference
+# Motor sine reference
 # =============================================================================
 
 
@@ -240,36 +244,14 @@ def _episode_time_s(env: ManagerBasedRlEnv) -> torch.Tensor:
   return env.episode_length_buf.to(dtype=torch.float32) * float(env.step_dt)
 
 
-def _step_target_position(
-  env: ManagerBasedRlEnv,
-) -> torch.Tensor:
-  """Alternate the pendulum target between +45 and -45 degrees."""
-
-  time_s = _episode_time_s(env)
-
-  section = torch.floor(time_s / _STEP_HOLD_TIME_S).to(torch.int64)
-
-  positive_target = torch.full_like(
-    time_s,
-    _STEP_TARGET_ANGLE_RAD,
-  )
-  negative_target = torch.full_like(
-    time_s,
-    -_STEP_TARGET_ANGLE_RAD,
-  )
-
-  return torch.where(
-    section % 2 == 0,
-    positive_target,
-    negative_target,
-  )
+def _motor_sine_phase(env: ManagerBasedRlEnv) -> torch.Tensor:
+  """Current phase of the sinusoidal motor target."""
+  return 2.0 * math.pi * _MOTOR_SINE_FREQUENCY_HZ * _episode_time_s(env)
 
 
-def _step_target_velocity(
-  env: ManagerBasedRlEnv,
-) -> torch.Tensor:
-  """The target remains stationary between target changes."""
-  return torch.zeros_like(_episode_time_s(env))
+def _motor_target_position(env: ManagerBasedRlEnv) -> torch.Tensor:
+  """Motor target position ranging from -90 to +90 degrees."""
+  return _MOTOR_SINE_AMPLITUDE_RAD * torch.sin(_motor_sine_phase(env))
 
 
 # =============================================================================
@@ -279,7 +261,7 @@ def _step_target_velocity(
 
 def cylinder_angle_cos_sin(
   env: ManagerBasedRlEnv,
-  asset_cfg: SceneEntityCfg = _CYLINDER_CFG,
+  asset_cfg: SceneEntityCfg = _MOTOR_CFG,
 ) -> torch.Tensor:
   """Periodic representation of the actuated motor angle."""
   asset: Entity = env.scene[asset_cfg.name]
@@ -289,30 +271,6 @@ def cylinder_angle_cos_sin(
     [torch.cos(angle), torch.sin(angle)],
     dim=-1,
   )
-
-
-def pole_angle_cos_sin(
-  env: ManagerBasedRlEnv,
-  asset_cfg: SceneEntityCfg = _POLE_CFG,
-) -> torch.Tensor:
-  """Periodic representation of the passive pendulum angle."""
-  asset: Entity = env.scene[asset_cfg.name]
-  angle = asset.data.joint_pos[:, asset_cfg.joint_ids]
-
-  return torch.cat(
-    [torch.cos(angle), torch.sin(angle)],
-    dim=-1,
-  )
-
-
-def scaled_joint_pos(
-  env: ManagerBasedRlEnv,
-  asset_cfg: SceneEntityCfg,
-  scale: float,
-) -> torch.Tensor:
-  """Joint position divided by a fixed task scale."""
-  asset: Entity = env.scene[asset_cfg.name]
-  return asset.data.joint_pos[:, asset_cfg.joint_ids] / scale
 
 
 def scaled_joint_vel(
@@ -325,14 +283,12 @@ def scaled_joint_vel(
   return asset.data.joint_vel[:, asset_cfg.joint_ids] / scale
 
 
-def step_target_observation(
+def motor_target_observation(
   env: ManagerBasedRlEnv,
 ) -> torch.Tensor:
-  """Normalized current pendulum target."""
-
-  target_position = _step_target_position(env)
-
-  return (target_position / _STEP_TARGET_ANGLE_RAD).unsqueeze(-1)
+  """Normalized motor sine target in the range [-1, 1]."""
+  target_position = _motor_target_position(env)
+  return (target_position / _MOTOR_SINE_AMPLITUDE_RAD).unsqueeze(-1)
 
 
 # =============================================================================
@@ -340,31 +296,74 @@ def step_target_observation(
 # =============================================================================
 
 
-def pendulum_step_tracking_reward(
+def motor_sine_tracking_reward(
   env: ManagerBasedRlEnv,
-  pole_cfg: SceneEntityCfg = _POLE_CFG,
-  position_sigma_rad: float = _STEP_POSITION_SIGMA_RAD,
-  velocity_sigma_rad_s: float = _STEP_VELOCITY_SIGMA_RAD_S,
+  cylinder_cfg: SceneEntityCfg = _MOTOR_CFG,
 ) -> torch.Tensor:
-  """Reward the pendulum for reaching and holding the step target."""
+  """Minimize squared error between motor angle and sinusoidal target."""
+  asset: Entity = env.scene[cylinder_cfg.name]
 
-  asset: Entity = env.scene[pole_cfg.name]
+  motor_position = asset.data.joint_pos[:, cylinder_cfg.joint_ids].squeeze(-1)
 
-  pole_position = asset.data.joint_pos[:, pole_cfg.joint_ids].squeeze(-1)
+  target_position = _motor_target_position(env)
 
-  pole_velocity = asset.data.joint_vel[:, pole_cfg.joint_ids].squeeze(-1)
-
-  target_position = _step_target_position(env)
-
+  # Circular error in [-pi, pi].
   position_error = torch.atan2(
-    torch.sin(pole_position - target_position),
-    torch.cos(pole_position - target_position),
+    torch.sin(motor_position - target_position),
+    torch.cos(motor_position - target_position),
   )
 
-  return torch.exp(
-    -(position_error / float(position_sigma_rad)).square()
-    - (pole_velocity / float(velocity_sigma_rad_s)).square()
-  )
+  # PPO maximizes reward, so minimizing error^2 is expressed as -error^2.
+  return -position_error.square()
+
+
+class action_rate_l2:
+  """Penalize rapid changes between consecutive raw policy actions."""
+
+  def __init__(
+    self,
+    cfg: RewardTermCfg,
+    env: ManagerBasedRlEnv,
+  ):
+    del cfg
+    self._previous_action = torch.zeros(
+      (env.num_envs, 1),
+      device=env.device,
+      dtype=torch.float32,
+    )
+    self._initialized = torch.zeros(
+      env.num_envs,
+      device=env.device,
+      dtype=torch.bool,
+    )
+
+  def __call__(
+    self,
+    env: ManagerBasedRlEnv,
+  ) -> torch.Tensor:
+    current_action = env.action_manager.action[:, :1]
+    action_delta = current_action - self._previous_action
+    penalty = action_delta.square().squeeze(-1)
+
+    penalty = torch.where(
+      self._initialized,
+      penalty,
+      torch.zeros_like(penalty),
+    )
+
+    self._previous_action = current_action.clone()
+    self._initialized[:] = True
+    return penalty
+
+  def reset(
+    self,
+    env_ids: torch.Tensor | slice | None = None,
+  ) -> None:
+    if env_ids is None:
+      env_ids = slice(None)
+
+    self._previous_action[env_ids] = 0.0
+    self._initialized[env_ids] = False
 
 
 # =============================================================================
@@ -372,18 +371,12 @@ def pendulum_step_tracking_reward(
 # =============================================================================
 
 
-def reset_random_360_task(
+def reset_motor_random_360(
   env: ManagerBasedRlEnv,
   env_ids: torch.Tensor | None,
-  asset_cfg: SceneEntityCfg = _JOINTS_CFG,
+  asset_cfg: SceneEntityCfg = _MOTOR_CFG,
 ) -> None:
-  """Reset motor and pendulum to independent random angles over 360 degrees.
-
-  Revolute 3 (motor): uniform random angle in [-pi, pi]
-  Revolute 5 (pendulum): uniform random angle in [-pi, pi]
-  Both initial velocities: zero
-  """
-
+  """Reset only Revolute 3 over one full revolution."""
   if env_ids is None:
     env_ids = torch.arange(
       env.num_envs,
@@ -404,7 +397,7 @@ def reset_random_360_task(
     2.0
     * math.pi
     * torch.rand(
-      (num_resets, 2),
+      (num_resets, 1),
       device=env.device,
       dtype=torch.float32,
     )
@@ -434,36 +427,27 @@ def reset_random_360_task(
 
 
 def _make_env_cfg() -> ManagerBasedRlEnvCfg:
+  # One frame = 4 values:
+  #   [cos(motor_angle), sin(motor_angle), motor_velocity / 30, target / 90deg]
+  #
+  # history_length=2 means the policy receives 8 values total.
+  # The passive pole remains in the simulation dynamics, but its angle and
+  # velocity are intentionally not available to the policy.
   actor_terms = {
-    "cylinder_angle": ObservationTermCfg(
-      func=scaled_joint_pos,
-      params={
-        "asset_cfg": _CYLINDER_CFG,
-        "scale": math.pi,
-      },
-      clip=(-2.0, 2.0),
-    ),
-    "cylinder_angle_periodic": ObservationTermCfg(
+    "motor_angle_periodic": ObservationTermCfg(
       func=cylinder_angle_cos_sin,
-      params={"asset_cfg": _CYLINDER_CFG},
+      params={"asset_cfg": _MOTOR_CFG},
     ),
-    "pole_angle_periodic": ObservationTermCfg(
-      func=pole_angle_cos_sin,
-      params={"asset_cfg": _POLE_CFG},
-    ),
-    "joint_velocity": ObservationTermCfg(
+    "motor_velocity": ObservationTermCfg(
       func=scaled_joint_vel,
       params={
-        "asset_cfg": _JOINTS_CFG,
+        "asset_cfg": _MOTOR_CFG,
         "scale": _VEL_OBS_SCALE,
       },
       clip=(-5.0, 5.0),
     ),
-    "step_target": ObservationTermCfg(
-      func=step_target_observation,
-    ),
-    "last_action": ObservationTermCfg(
-      func=last_action,
+    "motor_target": ObservationTermCfg(
+      func=motor_target_observation,
     ),
   }
 
@@ -491,23 +475,24 @@ def _make_env_cfg() -> ManagerBasedRlEnvCfg:
   }
 
   events = {
-    "reset_random_360_task": EventTermCfg(
-      func=reset_random_360_task,
+    "reset_motor_random_360": EventTermCfg(
+      func=reset_motor_random_360,
       mode="reset",
-      params={"asset_cfg": _JOINTS_CFG},
+      params={"asset_cfg": _MOTOR_CFG},
     ),
   }
 
-  # Exactly one reward term: passive-pendulum step tracking.
+  # Stage 1 jitter suppression:
+  # keep the original tracking objective and add only action-rate smoothing.
   rewards = {
-    "pendulum_step_tracking": RewardTermCfg(
-      func=pendulum_step_tracking_reward,
+    "motor_sine_tracking": RewardTermCfg(
+      func=motor_sine_tracking_reward,
       weight=1.0,
-      params={
-        "pole_cfg": _POLE_CFG,
-        "position_sigma_rad": _STEP_POSITION_SIGMA_RAD,
-        "velocity_sigma_rad_s": _STEP_VELOCITY_SIGMA_RAD_S,
-      },
+      params={"cylinder_cfg": _MOTOR_CFG},
+    ),
+    "action_rate": RewardTermCfg(
+      func=action_rate_l2,
+      weight=-0.01,
     ),
   }
 
@@ -551,8 +536,8 @@ def _make_env_cfg() -> ManagerBasedRlEnvCfg:
   )
 
 
-# Exported separately as Mjlab-Inverse-Sine.
-def inverse_sine_env_cfg(
+# Exported as Mjlab-Inverse-Motor-Sine.
+def motor_only_sine_env_cfg(
   play: bool = False,
 ) -> ManagerBasedRlEnvCfg:
   cfg = _make_env_cfg()
@@ -571,7 +556,7 @@ def inverse_sine_env_cfg(
 # =============================================================================
 
 
-def inverse_sine_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
+def motor_only_sine_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
   return RslRlOnPolicyRunnerCfg(
     actor=RslRlModelCfg(
       hidden_dims=(128, 128),
@@ -579,7 +564,7 @@ def inverse_sine_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
       obs_normalization=False,
       distribution_cfg={
         "class_name": "GaussianDistribution",
-        "init_std": 1.0,
+        "init_std": 0.3,
         "std_type": "log",
       },
     ),
@@ -592,7 +577,7 @@ def inverse_sine_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
       value_loss_coef=1.0,
       use_clipped_value_loss=True,
       clip_param=0.2,
-      entropy_coef=0.008,
+      entropy_coef=0.001,
       num_learning_epochs=3,
       num_mini_batches=4,
       learning_rate=3.0e-4,
@@ -602,7 +587,7 @@ def inverse_sine_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
       desired_kl=0.01,
       max_grad_norm=0.5,
     ),
-    experiment_name="inverse_sine",
+    experiment_name="motor_only_sine",
     save_interval=50,
     num_steps_per_env=64,
     max_iterations=5000,

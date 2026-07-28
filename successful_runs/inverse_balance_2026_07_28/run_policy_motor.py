@@ -67,7 +67,7 @@ from datetime import datetime
 import numpy as np
 import tyro
 
-from mjlab.tasks.inverse.commission_motor import (
+from .commission_motor import (
   _float_to_uint,
   _matches_mit_reply,
   _open_bus,
@@ -78,12 +78,12 @@ from mjlab.tasks.inverse.commission_motor import (
   enable_mit,
   set_zero_mit,
 )
-from mjlab.tasks.inverse.real_policy_inference import (
+from .real_policy_inference import (
   InverseRealPolicy,
   RealInferenceConfig,
   RealMeasurement,
 )
-from mjlab.tasks.inverse.robot_state_reader import RobotStateReader
+from .robot_state_reader import RobotStateReader
 
 
 @dataclass(frozen=True)

@@ -12,6 +12,11 @@ from mjlab.tasks.inverse.inverse_sine_env_cfg import (
 )
 from mjlab.tasks.registry import register_mjlab_task
 
+from mjlab.tasks.inverse.motor_only_sine_env_cfg import (
+  motor_only_sine_env_cfg,
+  motor_only_sine_ppo_runner_cfg,
+)
+
 
 register_mjlab_task(
   task_id="Mjlab-Inverse-Balance",
@@ -34,4 +39,11 @@ register_mjlab_task(
   env_cfg=inverse_sine_env_cfg(),
   play_env_cfg=inverse_sine_env_cfg(play=True),
   rl_cfg=inverse_sine_ppo_runner_cfg(),
+)
+
+register_mjlab_task(
+  task_id="Mjlab-Inverse-Motor-Only-Sine",
+  env_cfg=motor_only_sine_env_cfg(),
+  play_env_cfg=motor_only_sine_env_cfg(play=True),
+  rl_cfg=motor_only_sine_ppo_runner_cfg(),
 )
