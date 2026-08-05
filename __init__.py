@@ -1,3 +1,7 @@
+from mjlab.tasks.inverse.inverse_actuator_net_env_cfg import (
+  inverse_actuator_net_env_cfg,
+  inverse_actuator_net_ppo_runner_cfg,
+)
 from mjlab.tasks.inverse.inverse_env_cfg import (
   inverse_balance_env_cfg,
   inverse_ppo_runner_cfg,
@@ -10,19 +14,24 @@ from mjlab.tasks.inverse.inverse_sine_env_cfg import (
   inverse_sine_env_cfg,
   inverse_sine_ppo_runner_cfg,
 )
-from mjlab.tasks.registry import register_mjlab_task
-
 from mjlab.tasks.inverse.motor_only_sine_env_cfg import (
   motor_only_sine_env_cfg,
   motor_only_sine_ppo_runner_cfg,
 )
-
+from mjlab.tasks.registry import register_mjlab_task
 
 register_mjlab_task(
   task_id="Mjlab-Inverse-Balance",
   env_cfg=inverse_balance_env_cfg(),
   play_env_cfg=inverse_balance_env_cfg(play=True),
   rl_cfg=inverse_ppo_runner_cfg(),
+)
+
+register_mjlab_task(
+  task_id="Mjlab-Inverse-Balance-ActuatorNet",
+  env_cfg=inverse_actuator_net_env_cfg(),
+  play_env_cfg=inverse_actuator_net_env_cfg(play=True),
+  rl_cfg=inverse_actuator_net_ppo_runner_cfg(),
 )
 
 

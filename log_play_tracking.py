@@ -17,13 +17,14 @@ from mjlab.rl import MjlabOnPolicyRunner, RslRlVecEnvWrapper
 from mjlab.tasks.registry import load_env_cfg, load_rl_cfg, load_runner_cls
 from mjlab.utils.torch import configure_torch_backends
 
-TASK_ID = "Mjlab-Inverse-Balance"
+DEFAULT_TASK_ID = "Mjlab-Inverse-Balance"
 DEFAULT_LOG_DIR = Path("src/mjlab/tasks/inverse/play_tracking_logs")
 
 
 @dataclass(frozen=True)
 class LogPlayTrackingConfig:
   checkpoint_file: str
+  task_id: str = DEFAULT_TASK_ID
   duration_s: float = 8.0
   device: str | None = None
   with_disturbance: bool = False
@@ -31,6 +32,7 @@ class LogPlayTrackingConfig:
   no_terminations: bool = False
   log_dir: str = str(DEFAULT_LOG_DIR)
   print_every: int = 10
+  plot_torque: bool = False
 
 
 CSV_HEADER = [
@@ -71,6 +73,7 @@ CSV_HEADER = [
   "pole_qd_post_deg_s",
   "pole_lift_pre_deg",
   "pole_lift_post_deg",
+  "target_torque_nm",
   "reward",
   "done",
 ]
@@ -99,7 +102,7 @@ def _reset_vec_env(env: RslRlVecEnvWrapper):
 
 
 def _build_env(cfg: LogPlayTrackingConfig, device: str) -> ManagerBasedRlEnv:
-  env_cfg = load_env_cfg(TASK_ID, play=not cfg.with_disturbance)
+  env_cfg = load_env_cfg(cfg.task_id, play=not cfg.with_disturbance)
   env_cfg.scene.num_envs = 1
   env_cfg.episode_length_s = max(float(cfg.duration_s), env_cfg.episode_length_s)
   env_cfg.observations["actor"].enable_corruption = False
@@ -136,6 +139,8 @@ def _get_joint_snapshot(env: ManagerBasedRlEnv) -> dict[str, float]:
   q_target = asset.data.joint_pos_target
   actuator_force = asset.data.actuator_force
   qfrc_actuator = asset.data.qfrc_actuator
+  actuator = asset.actuators[0]
+  target_torque = getattr(actuator, "_last_target_torque", None)
   return {
     "cylinder_q_rad": _to_float(q[:, 0]),
     "pole_q_rad": _to_float(q[:, 1]),
@@ -144,7 +149,37 @@ def _get_joint_snapshot(env: ManagerBasedRlEnv) -> dict[str, float]:
     "joint_pos_target_rad": _to_float(q_target[:, 0]),
     "actuator_force_nm": _to_float(actuator_force[:, 0]),
     "qfrc_actuator_nm": _to_float(qfrc_actuator[:, 0]),
+    "target_torque_nm": (
+      _to_float(target_torque[:, 0]) if target_torque is not None else float("nan")
+    ),
   }
+
+
+def _plot_torque(csv_path: Path) -> Path:
+  import matplotlib
+
+  matplotlib.use("Agg")
+  import matplotlib.pyplot as plt
+  import numpy as np
+
+  data = np.genfromtxt(csv_path, delimiter=",", names=True)
+  figure, axis = plt.subplots(figsize=(11, 5))
+  axis.plot(data["time_s"], data["target_torque_nm"], label="target torque")
+  axis.plot(
+    data["time_s"],
+    data["actuator_force_post_nm"],
+    label="ActuatorNet output torque",
+  )
+  axis.set_xlabel("time (s)")
+  axis.set_ylabel("torque (N m)")
+  axis.grid(True)
+  axis.legend()
+  figure.tight_layout()
+
+  png_path = csv_path.with_name(f"{csv_path.stem}_torque.png")
+  figure.savefig(png_path, dpi=180)
+  plt.close(figure)
+  return png_path
 
 
 def _get_processed_action(action_term: Any) -> torch.Tensor:
@@ -206,10 +241,10 @@ def run(cfg: LogPlayTrackingConfig) -> Path:
     raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
 
   raw_env = _build_env(cfg, device)
-  agent_cfg = load_rl_cfg(TASK_ID)
+  agent_cfg = load_rl_cfg(cfg.task_id)
   env = RslRlVecEnvWrapper(raw_env, clip_actions=agent_cfg.clip_actions)
 
-  runner_cls = load_runner_cls(TASK_ID) or MjlabOnPolicyRunner
+  runner_cls = load_runner_cls(cfg.task_id) or MjlabOnPolicyRunner
   runner = runner_cls(env, asdict(agent_cfg), device=device)
   runner.load(
     str(checkpoint_path), load_cfg={"actor": True}, strict=True, map_location=device
@@ -259,7 +294,9 @@ def run(cfg: LogPlayTrackingConfig) -> Path:
       if last_policy_target_rad is None:
         joint_pos_target_vel_rad_s = 0.0
       else:
-        joint_pos_target_vel_rad_s = (processed_action_rad - last_policy_target_rad) / policy_dt
+        joint_pos_target_vel_rad_s = (
+          processed_action_rad - last_policy_target_rad
+        ) / policy_dt
       last_policy_target_rad = processed_action_rad
 
       substep_rows = []
@@ -318,6 +355,7 @@ def run(cfg: LogPlayTrackingConfig) -> Path:
             f"{_deg(post['pole_qd_rad_s']):.6f}",
             f"{_pole_lift_deg(pre['pole_q_rad']):.6f}",
             f"{_pole_lift_deg(post['pole_q_rad']):.6f}",
+            f"{post['target_torque_nm']:.8f}",
             "0.00000000",
             0,
           ]
@@ -350,6 +388,9 @@ def run(cfg: LogPlayTrackingConfig) -> Path:
 
   env.close()
   print(f"[INFO] CSV saved: {csv_path}")
+  if cfg.plot_torque:
+    png_path = _plot_torque(csv_path)
+    print(f"[INFO] torque plot saved: {png_path}")
   return csv_path
 
 

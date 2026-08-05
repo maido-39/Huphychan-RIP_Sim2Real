@@ -10,6 +10,7 @@ Wizard flow:
 4) Reboot and verify final ID/protocol.
 5) Motion check: set zero, enable, move to 90 deg for 1s, then back to 0 deg.
 """
+
 from __future__ import annotations
 
 import argparse

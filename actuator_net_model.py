@@ -23,6 +23,7 @@ time -- no leakage from the label:
 
 Label: motor_torque_nm at the current sample.
 """
+
 from __future__ import annotations
 
 import torch
@@ -40,7 +41,11 @@ def _ema(values, tau_s: float, dt_s: float):
 
 
 def build_dataset(
-  run: dict, *, history: int, ema_short_s: float | None = None, ema_long_s: float | None = None
+  run: dict,
+  *,
+  history: int,
+  ema_short_s: float | None = None,
+  ema_long_s: float | None = None,
 ):
   """run: dict with list/array fields "t", "target_torque_nm", "motor_torque_nm",
   "motor_vel_deg_s", "target_angle_deg" (same keys _load_run in train_actuator_net.py
@@ -68,14 +73,18 @@ def build_dataset(
   # position target), so it's reconstructed the same way for every source: the time
   # derivative of the position target. For sine_control_log.py runs this exactly
   # reproduces the analytic feedforward velocity that was actually commanded.
-  target_vel = np.gradient(np.asarray(target_angle, dtype=np.float64), np.asarray(t, dtype=np.float64))
+  target_vel = np.gradient(
+    np.asarray(target_angle, dtype=np.float64), np.asarray(t, dtype=np.float64)
+  )
 
   X = []
   y = []
   target_now = []
   for i in range(history - 1, n):
     tau_hist = target[i - history + 1 : i + 1]
-    vel_hist = [v / 1000.0 for v in vel[i - history + 1 : i + 1]]  # deg/s -> ~O(1) scale
+    vel_hist = [
+      v / 1000.0 for v in vel[i - history + 1 : i + 1]
+    ]  # deg/s -> ~O(1) scale
     target_vel_hist = [v / 1000.0 for v in target_vel[i - history + 1 : i + 1]]
     feat = list(tau_hist) + vel_hist + list(target_vel_hist)
     if use_ema:
@@ -106,8 +115,10 @@ class ActuatorNet(nn.Module):
   def __init__(self, in_dim: int, hidden: int, **_unused):
     super().__init__()
     self.net = nn.Sequential(
-      nn.Linear(in_dim, hidden), nn.Softsign(),
-      nn.Linear(hidden, hidden), nn.Softsign(),
+      nn.Linear(in_dim, hidden),
+      nn.Softsign(),
+      nn.Linear(hidden, hidden),
+      nn.Softsign(),
       nn.Linear(hidden, 1),
     )
 

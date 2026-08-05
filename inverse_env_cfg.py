@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import math
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -14,20 +14,20 @@ import torch
 from mjlab.actuator.xml_actuator import XmlActuatorCfg
 from mjlab.entity import Entity, EntityArticulationInfoCfg, EntityCfg
 from mjlab.envs import ManagerBasedRlEnvCfg
-from mjlab.envs.mdp import dr
-from mjlab.envs.mdp import events as event_fns
 from mjlab.envs.mdp import (
+  dr,
   last_action,
   time_out,
 )
+from mjlab.envs.mdp import events as event_fns
 from mjlab.envs.mdp.actions import JointPositionAction, JointPositionActionCfg
 from mjlab.managers.action_manager import ActionTermCfg
 from mjlab.managers.event_manager import EventTermCfg, RecomputeLevel
+from mjlab.managers.metrics_manager import MetricsTermCfg
 from mjlab.managers.observation_manager import (
   ObservationGroupCfg,
   ObservationTermCfg,
 )
-from mjlab.managers.metrics_manager import MetricsTermCfg
 from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.managers.termination_manager import TerminationTermCfg
@@ -64,8 +64,12 @@ _CYLINDER_CHATTER_REVERSALS_PER_SEC = 3
 _CYLINDER_CHATTER_UPRIGHT_EXEMPTION = math.radians(30.0)
 _VEL_OBS_SCALE = 30.0
 _BALANCE_START_PROBABILITY = 0.3
-_BALANCE_HOLD_THRESHOLD = math.radians(5.0)
+_BALANCE_HOLD_THRESHOLD = math.radians(3.0)
 _HOLD_STREAK_SCALE_STEPS = 50.0  # ~1s at 50Hz; streak reward saturates over this span.
+_CYLINDER_CENTER_UPRIGHT_THRESHOLD = math.radians(10.0)
+_SAME_DIRECTION_UPRIGHT_THRESHOLD = math.radians(5.0)
+_SAME_DIRECTION_HOLD_S = 1.0
+_CYLINDER_CENTER_REWARD_SCALE = math.radians(360.0)
 _EXACT_UPRIGHT_BONUS_THRESHOLD = math.radians(30.0)
 _UPPER_SWING_THRESHOLD = math.radians(70.0)
 _NEAR_UPRIGHT_SPEED_PENALTY_THRESHOLD = math.radians(30.0)
@@ -83,28 +87,94 @@ _CYLINDER_TARGET_DELTA_CHANGE_LIMIT = _CYLINDER_TARGET_ACCEL_LIMIT * 0.02 * 0.02
 _JOINT5_RANDOMIZATION_SCALE = (0.5, 1.5)
 _OBS_ANGLE_NOISE_RAD = math.radians(5.0)  # Absolute angle noise (not scale-based).
 _OBS_VEL_NOISE_RAD_S = math.radians(50.0)  # Absolute velocity noise.
+# Encoder read/compute latency. Observation delay is quantized to policy
+# steps (20 ms each at decimation=4), so 0-2 steps covers 0-40 ms.
+_OBS_DELAY_MIN_STEPS = 0
+_OBS_DELAY_MAX_STEPS = 2  # 0-40 ms.
+_OBS_DELAY_UPDATE_PERIOD = 25  # Resample roughly every 0.5 s of sim time.
 _CYLINDER_FRICTIONLOSS_RANGE = (0.05, 0.2)
 _CYLINDER_ARMATURE_RANGE = (0.001, 0.005)
 # Cylinder DOF inertia excluding armature (rotor + pole coupling), from
 # mj_fullM at pole 0/180 deg with the old armature=0.000017 subtracted out:
 # 1.681026e-4 - 0.000017 = 1.511026e-4 kg*m^2.
 _CYLINDER_BASELINE_INERTIA = 1.511e-4
-_CYLINDER_START_POSITION_RANGE = (-math.pi, math.pi)
+_CYLINDER_START_POSITION_RANGE = (-2.0 * math.pi, 2.0 * math.pi)
 _POLE_COM_VERTICAL_OFFSET_RANGE = (-0.003, 0.003)
 _RANDOMIZED_PLAY_ENV_VAR = "MJLAB_INVERSE_PLAY_RANDOMIZED"
 
 # Pole-tip disturbance:
 # A short force is applied near the end of BoldHolder_1 at random intervals.
 # The body origin is the pole pivot and the pole extends mainly along local -Z.
-_POLE_PUSH_FORCE_RANGE = (0.030, 0.10)  # N
+_POLE_PUSH_FORCE_RANGE = (-0.30, 0.30)  # N, random push in either direction.
 _POLE_PUSH_TORQUE_RANGE = (0.0, 0.0)  # N*m; moment comes from force × tip offset.
-_POLE_PUSH_DURATION_S = (0.03, 0.06)
+_POLE_PUSH_DURATION_S = (0.02, 0.04)
 _POLE_PUSH_COOLDOWN_S = (1.5, 3.5)
 _POLE_PUSH_POINT_OFFSET = (0.0, 0.0, -0.06)  # m, near the pole tip.
+_POLE_PUSH_UPRIGHT_THRESHOLD = math.radians(10.0)
 
 
 def _env_flag(name: str) -> bool:
   return os.environ.get(name, "").lower() in {"1", "true", "yes", "on"}
+
+
+class upright_pole_tip_impulse(event_fns.apply_body_impulse):
+  """Apply pole-tip impulses only while the pole is inside the upright band."""
+
+  def __init__(self, cfg: EventTermCfg, env: ManagerBasedRlEnv):
+    super().__init__(cfg=cfg, env=env)
+    pole_cfg: SceneEntityCfg = cfg.params["pole_cfg"]
+    self._pole_asset: Entity = env.scene[pole_cfg.name]
+    self._pole_joint_ids = pole_cfg.joint_ids
+
+  def __call__(
+    self,
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor | None,
+    force_range: tuple[float, float],
+    torque_range: tuple[float, float],
+    duration_s: tuple[float, float],
+    cooldown_s: tuple[float, float],
+    asset_cfg: SceneEntityCfg,
+    body_point_offset: tuple[float, float, float] | None = None,
+    pole_cfg: SceneEntityCfg | None = None,
+    upright_threshold_rad: float = _POLE_PUSH_UPRIGHT_THRESHOLD,
+  ) -> None:
+    del pole_cfg
+    super().__call__(
+      env=env,
+      env_ids=env_ids,
+      force_range=force_range,
+      torque_range=torque_range,
+      duration_s=duration_s,
+      cooldown_s=cooldown_s,
+      asset_cfg=asset_cfg,
+      body_point_offset=body_point_offset,
+    )
+
+    pole_angle = self._pole_asset.data.joint_pos[:, self._pole_joint_ids].squeeze(-1)
+    pole_error = torch.atan2(
+      torch.sin(pole_angle - _TARGET_POLE_ANGLE),
+      torch.cos(pole_angle - _TARGET_POLE_ANGLE),
+    )
+    outside_upright = torch.abs(pole_error) >= float(upright_threshold_rad)
+    cancelled = self._active & outside_upright
+    if not cancelled.any():
+      return
+
+    cancelled_ids = cancelled.nonzero(as_tuple=False).squeeze(-1)
+    zeros = torch.zeros(
+      (len(cancelled_ids), self._num_bodies, 3),
+      device=self._device,
+    )
+    self._asset.write_external_wrench_to_sim(
+      zeros,
+      zeros,
+      env_ids=cancelled_ids,
+      body_ids=self._body_ids,
+    )
+    self._active[cancelled_ids] = False
+    self._time_remaining[cancelled_ids] = 0.0
+    self._interval_time_left[cancelled_ids] = self._sample_cooldown(len(cancelled_ids))
 
 
 def _get_spec() -> mujoco.MjSpec:
@@ -314,6 +384,86 @@ def exact_upright_bonus(
   )
   normalized_error = torch.abs(pole_error) / float(active_threshold_rad)
   return torch.clamp(1.0 - normalized_error, min=0.0, max=1.0)
+
+
+def upright_cylinder_center_reward(
+  env: ManagerBasedRlEnv,
+  pole_cfg: SceneEntityCfg = _POLE_CFG,
+  cylinder_cfg: SceneEntityCfg = _CYLINDER_CFG,
+  upright_threshold_rad: float = _CYLINDER_CENTER_UPRIGHT_THRESHOLD,
+  cylinder_scale_rad: float = _CYLINDER_CENTER_REWARD_SCALE,
+) -> torch.Tensor:
+  """Reward returning the motor to zero, but only while the pole is upright."""
+  asset: Entity = env.scene[pole_cfg.name]
+  pole_angle = asset.data.joint_pos[:, pole_cfg.joint_ids].squeeze(-1)
+  cylinder_angle = asset.data.joint_pos[:, cylinder_cfg.joint_ids].squeeze(-1)
+
+  pole_error = torch.atan2(
+    torch.sin(pole_angle - _TARGET_POLE_ANGLE),
+    torch.cos(pole_angle - _TARGET_POLE_ANGLE),
+  )
+  upright_gate = torch.clamp(
+    1.0 - torch.abs(pole_error) / float(upright_threshold_rad),
+    min=0.0,
+    max=1.0,
+  )
+  centered = torch.exp(-(cylinder_angle / float(cylinder_scale_rad)).square())
+  return upright_gate * centered
+
+
+class cylinder_same_direction_penalty:
+  """Penalize the cylinder for spinning one way for too long while upright.
+
+  A sustained one-directional spin near upright is how the cylinder drifts
+  toward its rotation limit instead of oscillating around center.
+  """
+
+  def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+    del cfg
+    self._hold_steps = max(1, int(round(_SAME_DIRECTION_HOLD_S / env.step_dt)))
+    self._same_direction_steps = torch.zeros(
+      env.num_envs, device=env.device, dtype=torch.long
+    )
+    self._last_sign = torch.zeros(env.num_envs, device=env.device)
+
+  def __call__(
+    self,
+    env: ManagerBasedRlEnv,
+    pole_cfg: SceneEntityCfg = _POLE_CFG,
+    cylinder_cfg: SceneEntityCfg = _CYLINDER_CFG,
+    upright_threshold_rad: float = _SAME_DIRECTION_UPRIGHT_THRESHOLD,
+    min_speed_rad_s: float = math.radians(1.0),
+  ) -> torch.Tensor:
+    asset: Entity = env.scene[pole_cfg.name]
+    pole_angle = asset.data.joint_pos[:, pole_cfg.joint_ids].squeeze(-1)
+    cylinder_vel = asset.data.joint_vel[:, cylinder_cfg.joint_ids].squeeze(-1)
+
+    pole_error = torch.atan2(
+      torch.sin(pole_angle - _TARGET_POLE_ANGLE),
+      torch.cos(pole_angle - _TARGET_POLE_ANGLE),
+    )
+    upright = torch.abs(pole_error) < float(upright_threshold_rad)
+
+    sign = torch.sign(cylinder_vel)
+    sign = torch.where(
+      torch.abs(cylinder_vel) > min_speed_rad_s, sign, torch.zeros_like(sign)
+    )
+    same_direction = upright & (sign != 0.0) & (sign == self._last_sign)
+
+    self._same_direction_steps = torch.where(
+      same_direction,
+      self._same_direction_steps + 1,
+      torch.zeros_like(self._same_direction_steps),
+    )
+    self._last_sign = torch.where(sign != 0.0, sign, self._last_sign)
+
+    return (self._same_direction_steps >= self._hold_steps).float()
+
+  def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
+    if env_ids is None:
+      env_ids = slice(None)
+    self._same_direction_steps[env_ids] = 0
+    self._last_sign[env_ids] = 0.0
 
 
 def pole_slow_reward(
@@ -779,22 +929,34 @@ def _make_env_cfg() -> ManagerBasedRlEnvCfg:
       params={"asset_cfg": _CYLINDER_CFG, "scale": _MAX_CYLINDER_ROTATION},
       clip=(-1.5, 1.5),
       noise=cylinder_angle_noise,
+      delay_min_lag=_OBS_DELAY_MIN_STEPS,
+      delay_max_lag=_OBS_DELAY_MAX_STEPS,
+      delay_update_period=_OBS_DELAY_UPDATE_PERIOD,
     ),
     "cylinder_angle_periodic": ObservationTermCfg(
       func=cylinder_angle_cos_sin,
       params={"asset_cfg": _CYLINDER_CFG},
       noise=angle_cos_sin_noise,
+      delay_min_lag=_OBS_DELAY_MIN_STEPS,
+      delay_max_lag=_OBS_DELAY_MAX_STEPS,
+      delay_update_period=_OBS_DELAY_UPDATE_PERIOD,
     ),
     "pole_angle": ObservationTermCfg(
       func=pole_angle_cos_sin,
       params={"asset_cfg": _POLE_CFG},
       noise=angle_cos_sin_noise,
+      delay_min_lag=_OBS_DELAY_MIN_STEPS,
+      delay_max_lag=_OBS_DELAY_MAX_STEPS,
+      delay_update_period=_OBS_DELAY_UPDATE_PERIOD,
     ),
     "joint_vel": ObservationTermCfg(
       func=scaled_joint_vel,
       params={"asset_cfg": _JOINTS_CFG},
       clip=(-5.0, 5.0),
       noise=joint_vel_noise,
+      delay_min_lag=_OBS_DELAY_MIN_STEPS,
+      delay_max_lag=_OBS_DELAY_MAX_STEPS,
+      delay_update_period=_OBS_DELAY_UPDATE_PERIOD,
     ),
     "last_action": ObservationTermCfg(
       func=last_action,
@@ -903,10 +1065,12 @@ def _make_env_cfg() -> ManagerBasedRlEnvCfg:
       mode="reset",
     ),
     "pole_tip_impulse": EventTermCfg(
-      func=event_fns.apply_body_impulse,
+      func=upright_pole_tip_impulse,
       mode="step",
       params={
         "asset_cfg": _POLE_BODY_CFG,
+        "pole_cfg": _POLE_CFG,
+        "upright_threshold_rad": _POLE_PUSH_UPRIGHT_THRESHOLD,
         "force_range": _POLE_PUSH_FORCE_RANGE,
         "torque_range": _POLE_PUSH_TORQUE_RANGE,
         "duration_s": _POLE_PUSH_DURATION_S,
@@ -941,6 +1105,25 @@ def _make_env_cfg() -> ManagerBasedRlEnvCfg:
       params={
         "pole_cfg": _POLE_CFG,
         "active_threshold_rad": _EXACT_UPRIGHT_BONUS_THRESHOLD,
+      },
+    ),
+    "upright_cylinder_center": RewardTermCfg(
+      func=upright_cylinder_center_reward,
+      weight=1.5,
+      params={
+        "pole_cfg": _POLE_CFG,
+        "cylinder_cfg": _CYLINDER_CFG,
+        "upright_threshold_rad": _CYLINDER_CENTER_UPRIGHT_THRESHOLD,
+        "cylinder_scale_rad": _CYLINDER_CENTER_REWARD_SCALE,
+      },
+    ),
+    "cylinder_same_direction": RewardTermCfg(
+      func=cylinder_same_direction_penalty,
+      weight=-3.0,
+      params={
+        "pole_cfg": _POLE_CFG,
+        "cylinder_cfg": _CYLINDER_CFG,
+        "upright_threshold_rad": _SAME_DIRECTION_UPRIGHT_THRESHOLD,
       },
     ),
     "near_upright_pole_speed": RewardTermCfg(

@@ -185,7 +185,9 @@ _LOG_HEADER = [
 ]
 
 
-def _write_log_csv(csv_path: str, rows: list[tuple[float, float, float, float]]) -> None:
+def _write_log_csv(
+  csv_path: str, rows: list[tuple[float, float, float, float]]
+) -> None:
   with open(csv_path, "w", newline="") as f:
     writer = csv.writer(f)
     writer.writerow(_LOG_HEADER)
@@ -316,9 +318,7 @@ def _demo() -> int:
         # (콘솔 출력 주기로 스로틀하면 대부분의 실측 샘플을 놓친다).
         if logging_enabled and state.timestamp != last_logged_timestamp:
           vel_raw = log_velocity_raw.update(state.angle_deg, state.timestamp)
-          vel_filtered = log_velocity_filtered.update(
-            state.angle_deg, state.timestamp
-          )
+          vel_filtered = log_velocity_filtered.update(state.angle_deg, state.timestamp)
           log_rows.append(
             (state.timestamp - start_t, state.angle_deg, vel_raw, vel_filtered)
           )

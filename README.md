@@ -139,7 +139,7 @@ play에서 랜덤화된 reset 조건까지 보고 싶으면:
 
 ```bash
 MJLAB_INVERSE_PLAY_RANDOMIZED=1 uv run play Mjlab-Inverse-Balance \
-  --checkpoint-file logs/rsl_rl/inverse_balance/2026-07-15_14-39-22/model_900.pt
+  --checkpoint-file logs/rsl_rl/inverse_balance/2026-07-28_19-48-06/model_200000.pt
 ```
 
 ### 4. 체크포인트 재생 로그 + 그래프 시각화
@@ -172,3 +172,4 @@ MJLAB_INVERSE_PLAY_RANDOMIZED=1 uv run python src/mjlab/tasks/inverse/visualize_
   --no-fixed-start \
   --dpi 180
 ```
+scp   logs/rsl_rl/inverse_balance_actuator_net/2026-08-03_11-24-21/model_7250.pt   aril@192.168.0.18:/home/aril/Pygmalion/Pendulum/successful_checkpoints/

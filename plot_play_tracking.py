@@ -53,7 +53,9 @@ def run(cfg: PlotPlayTrackingConfig) -> Path:
   axes[0].legend()
 
   if "joint_pos_target_vel_deg_s" in data:
-    axes[1].plot(t, data["joint_pos_target_vel_deg_s"], label="q_target_vel_deg_s", linestyle="--")
+    axes[1].plot(
+      t, data["joint_pos_target_vel_deg_s"], label="q_target_vel_deg_s", linestyle="--"
+    )
   else:
     target_vel = np.gradient(data["joint_pos_target_deg"], t)
     axes[1].plot(t, target_vel, label="q_target_vel_deg_s (computed)", linestyle="--")
@@ -74,7 +76,9 @@ def run(cfg: PlotPlayTrackingConfig) -> Path:
 
   if "qfrc_actuator_post_nm" in data:
     axes[3].plot(t, data["qfrc_actuator_post_nm"], label="qfrc_actuator_post_nm")
-    axes[3].plot(t, data["actuator_force_post_nm"], label="actuator_force_post_nm", alpha=0.65)
+    axes[3].plot(
+      t, data["actuator_force_post_nm"], label="actuator_force_post_nm", alpha=0.65
+    )
   else:
     axes[3].text(0.5, 0.5, "No torque columns in CSV", ha="center", va="center")
   axes[3].axhline(0.0, linewidth=1.0, color="black")
@@ -84,7 +88,9 @@ def run(cfg: PlotPlayTrackingConfig) -> Path:
   axes[3].legend()
 
   axes[4].plot(t, data["raw_action"], label="raw_action")
-  axes[4].plot(t, data["processed_action_deg"] / 90.0, label="processed/90deg", alpha=0.7)
+  axes[4].plot(
+    t, data["processed_action_deg"] / 90.0, label="processed/90deg", alpha=0.7
+  )
   if "reward" in data:
     reward = data["reward"]
     denom = max(float(np.max(np.abs(reward))), 1.0)
